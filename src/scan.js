@@ -40,6 +40,13 @@ const COLLAPSE_NAMES = new Set([
 const DEFAULT_MAX_NODES = 20000;
 const DEFAULT_MAX_DEPTH = 24;
 
+// Any directory holding more than this many files collapses to a single count
+// node, whatever it is called. The name list above only catches conventions;
+// real scratch directories are full of unpacked release archives and build
+// artifacts with unguessable names, and a directory that big is one you decide
+// about at its top level anyway -- nobody triages a release build file by file.
+const DEFAULT_COLLAPSE_OVER = 400;
+
 function gitCapture(root, args) {
   return execFileSync('git', ['-C', root, ...args], {
     encoding: 'utf8',
@@ -171,10 +178,12 @@ export function formatBytes(n) {
  * Scan `root` into `{ root, generated, git, counts, nodes }`.
  *
  * Options:
- *   maxNodes  stop emitting past this many nodes (default 20000)
- *   maxDepth  stop descending past this depth (default 24)
- *   all       descend into COLLAPSE_NAMES dirs instead of summarizing them
- *   hidden    include dotfiles (default true; false skips them entirely)
+ *   maxNodes      stop emitting past this many nodes (default 20000)
+ *   maxDepth      stop descending past this depth (default 24)
+ *   collapseOver  collapse any dir holding more files than this (default 400)
+ *   all           descend into everything: ignores both the name list and
+ *                 collapseOver (nested repos and maxDepth still collapse)
+ *   hidden        include dotfiles (default true; false skips them entirely)
  */
 export function scan(root, opts = {}) {
   const maxNodes = opts.maxNodes ?? DEFAULT_MAX_NODES;
@@ -182,6 +191,7 @@ export function scan(root, opts = {}) {
   const includeHidden = opts.hidden !== false;
   const descendAll = !!opts.all;
 
+  const collapseOver = opts.collapseOver ?? DEFAULT_COLLAPSE_OVER;
   const useGit = opts.git !== false && isGitRepo(root);
   const prefix = useGit ? repoPrefix(root) : '';
   let tracked = new Set();
@@ -194,6 +204,7 @@ export function scan(root, opts = {}) {
   }
 
   const flat = [];
+  const collapsedDirs = [];
   let truncated = false;
 
   const relId = (abs) => {
@@ -230,23 +241,41 @@ export function scan(root, opts = {}) {
       const isDir = e.isDirectory() && !isLink;
 
       if (isDir) {
-        const collapse = !descendAll && COLLAPSE_NAMES.has(e.name);
+        const byName = !descendAll && COLLAPSE_NAMES.has(e.name);
         const nested = hasOwnGit(childAbs);
-        if (collapse || nested || depth >= maxDepth) {
-          const s = summarize(childAbs);
-          const label = `${s.files}${s.truncated ? '+' : ''} file${s.files === 1 ? '' : 's'}`;
-          const size = formatBytes(s.bytes);
+        const tooDeep = depth >= maxDepth;
+        // Size the subtree before descending, so a huge directory collapses on its
+        // own weight rather than flooding the tree with rows nobody will read.
+        // One walk decides and labels: probing to the threshold and then walking
+        // again for the tally would traverse the biggest directories twice.
+        // Probe with a budget rather than a full walk: deciding "is this over 400
+        // files" must not cost a traversal of a 3 GB subtree. Directories under
+        // the threshold finish early and are cheap; ones over it stop at the
+        // budget and get their real tally below, only if they collapse.
+        const probe = descendAll ? null : summarize(childAbs, collapseOver + 1);
+        const tooBig = probe && !byName && !nested && probe.files > collapseOver;
+
+        if (byName || nested || tooDeep || tooBig) {
+          // Collapsed directories get a full tally even though it costs a complete
+          // traversal. Size is the whole point of collapsing something -- "3 GB" is
+          // what tells you to deal with it -- and a partial count from the probe
+          // budget would report megabytes for a multi-gigabyte tree, which is worse
+          // than slow. Only these directories pay it; small ones stop at the probe.
+          const full = probe && !probe.truncated ? probe : summarize(childAbs);
+          const label = `${full.files} file${full.files === 1 ? '' : 's'}`;
+          const why = nested ? 'nested repo' : tooDeep ? 'too deep' : null;
           flat.push({
             id,
             name: e.name,
             parentId,
             kind: 'dir',
-            meta: [nested ? 'nested repo' : null, label, size].filter(Boolean).join(', '),
-            bytes: s.bytes,
-            files: s.files,
+            meta: [why, label, formatBytes(full.bytes)].filter(Boolean).join(', '),
+            bytes: full.bytes,
+            files: full.files,
             nestedRepo: nested,
             collapsedSubtree: true,
           });
+          collapsedDirs.push({ id, files: full.files, bytes: full.bytes });
           continue;
         }
         flat.push({ id, name: e.name, parentId, kind: 'dir' });
@@ -362,6 +391,10 @@ export function scan(root, opts = {}) {
     generated: new Date().toISOString(),
     git: useGit,
     truncated,
+    // What we chose not to expand, biggest first. A bare `truncated: true` tells
+    // you the view is partial but not what is missing, which is the part that
+    // matters when you are deciding whether to rescan with --all.
+    collapsed: collapsedDirs.sort((a, b) => b.files - a.files).slice(0, 50),
     counts: {
       nodes: nodes.length,
       dirs: count((n) => n.kind === 'dir'),

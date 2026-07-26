@@ -29,9 +29,10 @@ OPTIONS
   --allow-apply     let the browser apply the plan; off by default, so the web UI
                     can only dry-run and the destructive step stays in the terminal
   --yes             with 'apply': execute instead of dry-running
-  --all             descend into node_modules/dist/.venv etc. instead of summarizing
+  --all             descend into everything, ignoring the collapse rules
   --no-hidden       skip dotfiles entirely
   --max-nodes N     stop scanning past N entries (default 20000)
+  --collapse-over N show any dir holding more than N files as one row (default 400)
   --depth N         stop descending past depth N (default 24)
   --emit-prompts    with 'summarize': write a prompt pack for your coding agent
   --ingest          with 'summarize': merge an agent-filled summaries.json
@@ -69,6 +70,7 @@ function parseArgs(argv) {
     else if (a === '--json') opts.json = true;
     else if (a === '--port') opts.port = parseInt(argv[++i], 10);
     else if (a === '--max-nodes') opts.maxNodes = parseInt(argv[++i], 10);
+    else if (a === '--collapse-over') opts.collapseOver = parseInt(argv[++i], 10);
     else if (a === '--depth') opts.maxDepth = parseInt(argv[++i], 10);
     else if (a === '--model') opts.model = argv[++i];
     else if (a.startsWith('-')) {
@@ -95,7 +97,13 @@ function resolveRoot(candidate) {
 }
 
 function scanOpts(opts) {
-  return { all: opts.all, hidden: opts.hidden, maxNodes: opts.maxNodes, maxDepth: opts.maxDepth };
+  return {
+    all: opts.all,
+    hidden: opts.hidden,
+    maxNodes: opts.maxNodes,
+    maxDepth: opts.maxDepth,
+    collapseOver: opts.collapseOver,
+  };
 }
 
 function openBrowser(url) {
@@ -283,6 +291,18 @@ async function main() {
       )})${s.truncated ? ' [truncated -- raise --max-nodes]' : ''}`
     );
     console.log(`Git:      ${s.git ? 'yes' : 'no'}`);
+    if (s.collapsed && s.collapsed.length) {
+      // Say what was not expanded. "Scanned N entries" alone reads as complete
+      // coverage when the biggest things in the directory were summarized away.
+      const top = s.collapsed.slice(0, 5);
+      console.log(`Collapsed: ${s.collapsed.length} dir(s) shown as a single row:`);
+      for (const c of top) {
+        console.log(`  ${c.id}  (${c.files} files, ${formatBytes(c.bytes)})`);
+      }
+      if (s.collapsed.length > top.length) {
+        console.log(`  ...and ${s.collapsed.length - top.length} more. Use --all to descend.`);
+      }
+    }
     console.log(`Plan:     ${plan.savedAt ? `saved ${plan.savedAt}` : 'none yet'}`);
     console.log(`Pending:  ${ops.length} operation(s), ${stats.touched} node(s) touched`);
     if (problems.length) {
