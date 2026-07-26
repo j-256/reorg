@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>reorg</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">reorg<span class="brand-sub" id="rootLabel"></span></div>
+  <div class="toolbar" id="toolbar"></div>
+  <div class="spacer"></div>
+  <div class="savestate" id="saveState" title="Your plan autosaves to .reorg/plan.json">&hellip;</div>
+</header>
+
+<div class="stage" id="stage">
+  <section class="pane tree-pane">
+    <div class="pane-head">
+      <span class="dot"></span>
+      <span>working tree</span>
+      <span class="pane-hint" id="treeHint"></span>
+      <input class="filter" id="filterBox" type="search" placeholder="filter (name, /regex/)" spellcheck="false">
+    </div>
+    <div class="scroll" id="treeScroll"><ul class="tree" id="tree"></ul></div>
+  </section>
+
+  <div class="resizer" id="resizer" title="drag to resize &middot; double-click to center"></div>
+
+  <aside class="pane side-pane" id="sidePane">
+    <div class="pane-head">
+      <span class="dot alt"></span>
+      <span id="sideTitle">preview</span>
+      <span class="spacer"></span>
+      <button class="btn ghost" id="sideClose" title="close (Esc)">&times;</button>
+    </div>
+    <div class="scroll" id="sideBody"></div>
+  </aside>
+</div>
+
+<footer class="delta" id="delta"></footer>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<template id="tpl-row">
+  <li>
+    <div class="row" draggable="true">
+      <span class="twist"></span>
+      <span class="icon"></span>
+      <span class="name"></span>
+      <span class="meta"></span>
+      <span class="desc"></span>
+      <span class="tags"></span>
+    </div>
+  </li>
+</template>
+
+<script src="/app.js" type="module"></script>
+</body>
+</html>
