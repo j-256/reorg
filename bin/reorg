@@ -1,0 +1,334 @@
+#!/usr/bin/env node
+// reorg -- plan a directory reorganization in the browser, apply it with an undo script.
+
+import { existsSync, statSync } from 'node:fs';
+import { resolve as resolvePath } from 'node:path';
+import { spawn } from 'node:child_process';
+import { createReorgServer } from '../src/server.js';
+import { scan } from '../src/scan.js';
+import { loadPlan, listUndoScripts, stateDir, planPath, clearAppliedPlan } from '../src/state.js';
+import { resolve as resolvePlan, describeOp } from '../src/plan.js';
+import { apply } from '../src/apply.js';
+import { summarize, emitPrompts, ingestSummaries, DEFAULT_MODEL } from '../src/summarize.js';
+import { formatBytes } from '../src/scan.js';
+
+const HELP = `reorg -- plan a directory reorganization, then apply it safely.
+
+USAGE
+  reorg [dir]                    scan dir (default .), serve the planner, open a browser
+  reorg plan [dir]               print the current plan as operations, then exit
+  reorg apply [dir]              dry run: print what would happen, change nothing
+  reorg apply [dir] --yes        actually apply, writing an undo script first
+  reorg undo [dir]               run the most recent undo script
+  reorg summarize [dir]          one-line AI summary per file (see SUMMARIES)
+  reorg status [dir]             what is planned, what is applied, what can be undone
+
+OPTIONS
+  --port N          listen on N (default: first free port from 7777)
+  --no-open         do not launch a browser
+  --allow-apply     let the browser apply the plan; off by default, so the web UI
+                    can only dry-run and the destructive step stays in the terminal
+  --yes             with 'apply': execute instead of dry-running
+  --all             descend into node_modules/dist/.venv etc. instead of summarizing
+  --no-hidden       skip dotfiles entirely
+  --max-nodes N     stop scanning past N entries (default 20000)
+  --depth N         stop descending past depth N (default 24)
+  --emit-prompts    with 'summarize': write a prompt pack for your coding agent
+  --ingest          with 'summarize': merge an agent-filled summaries.json
+  --model ID        with 'summarize': model to call (default ${DEFAULT_MODEL})
+  --force           with 'summarize': re-summarize files that already have one
+  -h, --help        this text
+
+SUMMARIES
+  Two paths, both optional:
+    reorg summarize --emit-prompts   writes .reorg/summarize.md + summaries.json.
+                                     Point any coding agent at it -- no API key,
+                                     no cost. Then: reorg summarize --ingest
+    ANTHROPIC_API_KEY=... reorg summarize   calls the API directly and fills them in.
+
+SAFETY
+  Nothing is deleted. "Trash" moves into .reorg/trash/<run>/, recoverable by the
+  undo script. Every apply writes .reorg/undo-<run>.sh before it starts, and
+  aborts entirely if the tree changed since the scan. Your plan lives in
+  .reorg/plan.json; the whole .reorg directory is git-ignored automatically.
+`;
+
+function parseArgs(argv) {
+  const opts = { _: [] };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '-h' || a === '--help') opts.help = true;
+    else if (a === '--no-open') opts.open = false;
+    else if (a === '--allow-apply') opts.allowApply = true;
+    else if (a === '--yes' || a === '-y') opts.yes = true;
+    else if (a === '--all') opts.all = true;
+    else if (a === '--no-hidden') opts.hidden = false;
+    else if (a === '--emit-prompts') opts.emitPrompts = true;
+    else if (a === '--ingest') opts.ingest = true;
+    else if (a === '--force') opts.force = true;
+    else if (a === '--json') opts.json = true;
+    else if (a === '--port') opts.port = parseInt(argv[++i], 10);
+    else if (a === '--max-nodes') opts.maxNodes = parseInt(argv[++i], 10);
+    else if (a === '--depth') opts.maxDepth = parseInt(argv[++i], 10);
+    else if (a === '--model') opts.model = argv[++i];
+    else if (a.startsWith('-')) {
+      console.error(`reorg: unknown option ${a}\nTry: reorg --help`);
+      process.exit(2);
+    } else opts._.push(a);
+  }
+  return opts;
+}
+
+const KNOWN = new Set(['plan', 'apply', 'undo', 'summarize', 'status', 'serve']);
+
+function resolveRoot(candidate) {
+  const root = resolvePath(candidate || '.');
+  if (!existsSync(root)) {
+    console.error(`reorg: ${root} does not exist`);
+    process.exit(1);
+  }
+  if (!statSync(root).isDirectory()) {
+    console.error(`reorg: ${root} is not a directory`);
+    process.exit(1);
+  }
+  return root;
+}
+
+function scanOpts(opts) {
+  return { all: opts.all, hidden: opts.hidden, maxNodes: opts.maxNodes, maxDepth: opts.maxDepth };
+}
+
+function openBrowser(url) {
+  const cmd =
+    process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'start' : 'xdg-open';
+  try {
+    spawn(cmd, [url], { stdio: 'ignore', detached: true, shell: process.platform === 'win32' }).unref();
+  } catch {
+    /* headless or no handler; the URL is already printed */
+  }
+}
+
+function listen(server, port, host = '127.0.0.1', tries = 20) {
+  return new Promise((done, fail) => {
+    const attempt = (p, left) => {
+      const onError = (e) => {
+        if (e.code === 'EADDRINUSE' && left > 0) {
+          server.removeListener('error', onError);
+          attempt(p + 1, left - 1);
+        } else fail(e);
+      };
+      server.once('error', onError);
+      server.listen(p, host, () => {
+        server.removeListener('error', onError);
+        done(p);
+      });
+    };
+    attempt(port, tries);
+  });
+}
+
+function printOps(ops, stats) {
+  if (!ops.length) {
+    console.log('Nothing planned yet. Drag things around in the planner first.');
+    return;
+  }
+  for (const op of ops) console.log(`  ${describeOp(op)}`);
+  const bits = [];
+  if (stats.mkdir) bits.push(`${stats.mkdir} new dir${stats.mkdir === 1 ? '' : 's'}`);
+  if (stats.move) bits.push(`${stats.move} move${stats.move === 1 ? '' : 's'}`);
+  if (stats.trash) {
+    const size = stats.trashBytes ? ` (${formatBytes(stats.trashBytes)})` : '';
+    bits.push(`${stats.trash} to trash${size}`);
+  }
+  console.log(`\n${bits.join(', ')}.`);
+}
+
+function loadResolved(root, opts) {
+  const s = scan(root, scanOpts(opts));
+  const plan = loadPlan(root);
+  const resolved = resolvePlan(s, plan);
+  if (resolved.problems.length) {
+    console.error('This plan cannot be applied as-is:\n');
+    for (const p of resolved.problems) console.error(`  - ${p.message}`);
+    console.error('\nFix it in the planner, then try again.');
+    process.exit(1);
+  }
+  return resolved;
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const opts = parseArgs(argv);
+  if (opts.help) {
+    console.log(HELP);
+    return;
+  }
+
+  const [first, second] = opts._;
+  const cmd = KNOWN.has(first) ? first : 'serve';
+  const root = resolveRoot(KNOWN.has(first) ? second : first);
+
+  // ---- plan --------------------------------------------------------------
+  if (cmd === 'plan') {
+    const { ops, stats } = loadResolved(root, opts);
+    printOps(ops, stats);
+    return;
+  }
+
+  // ---- apply -------------------------------------------------------------
+  if (cmd === 'apply') {
+    const { ops, stats } = loadResolved(root, opts);
+    if (!ops.length) {
+      console.log('Nothing to apply.');
+      return;
+    }
+    if (!opts.yes) {
+      console.log(`DRY RUN -- nothing will change. ${ops.length} operation(s):\n`);
+      printOps(ops, stats);
+      console.log('\nRun again with --yes to apply. An undo script is written first.');
+      return;
+    }
+    console.log(`Applying ${ops.length} operation(s) in ${root}:\n`);
+    const res = apply(root, ops, { dryRun: false, onLog: (l) => console.log(l) });
+    if (res.problems.length) {
+      console.error('\nAborted before making any change:\n');
+      for (const p of res.problems) console.error(`  - ${p}`);
+      console.error('\nThe tree changed since the scan. Rescan in the planner and retry.');
+      process.exit(1);
+    }
+    // The plan has been realized, so retire it. Leaving it would make the next
+    // resolve see created folders both on disk and as pending, and report a
+    // collision that does not exist.
+    clearAppliedPlan(root);
+    console.log(`\nDone: ${res.applied} operation(s).`);
+    console.log(`Undo with:  reorg undo ${root === process.cwd() ? '' : root}`.trimEnd());
+    console.log(`         or: bash ${res.undoPath}`);
+    if (res.trashRoot && stats.trash) console.log(`Trashed items are at: ${res.trashRoot}`);
+    return;
+  }
+
+  // ---- undo --------------------------------------------------------------
+  if (cmd === 'undo') {
+    const scripts = listUndoScripts(root);
+    if (!scripts.length) {
+      console.error(`reorg: no undo scripts in ${stateDir(root)}`);
+      process.exit(1);
+    }
+    const latest = resolvePath(stateDir(root), scripts[0]);
+    console.log(`Running ${latest}\n`);
+    const child = spawn('bash', [latest], { stdio: 'inherit' });
+    child.on('exit', (code) => process.exit(code ?? 0));
+    return;
+  }
+
+  // ---- summarize ---------------------------------------------------------
+  if (cmd === 'summarize') {
+    if (opts.ingest) {
+      const { added, total } = ingestSummaries(root);
+      console.log(`Merged ${added} summar${added === 1 ? 'y' : 'ies'} (${total} total).`);
+      console.log('Reload the planner to see them inline.');
+      return;
+    }
+    const s = scan(root, scanOpts(opts));
+    const files = s.nodes.filter((n) => n.kind === 'file').map((n) => n.id);
+    if (!files.length) {
+      console.log('No files to summarize.');
+      return;
+    }
+    if (opts.emitPrompts || !process.env.ANTHROPIC_API_KEY) {
+      const out = await emitPrompts({ root, paths: files, force: opts.force });
+      if (!opts.emitPrompts) {
+        console.log('ANTHROPIC_API_KEY is not set, so falling back to the agent path.\n');
+      }
+      console.log(`Wrote a prompt pack for ${out.count} file(s):`);
+      console.log(`  ${out.promptPath}`);
+      console.log(`  ${out.outPath}   <- the file to fill in`);
+      console.log('\nNext: point your coding agent at that markdown file, then run');
+      console.log('  reorg summarize --ingest');
+      return;
+    }
+    console.log(`Summarizing with ${opts.model || DEFAULT_MODEL}...`);
+    const res = await summarize({
+      root,
+      paths: files,
+      model: opts.model,
+      force: opts.force,
+      onProgress: ({ done, total }) => {
+        if (total) process.stderr.write(`\r  ${done}/${total} files`);
+      },
+    });
+    process.stderr.write('\n');
+    if (res.error) {
+      console.error(`reorg: ${res.error}`);
+      process.exit(1);
+    }
+    const n = Object.keys(res.summaries).length;
+    console.log(`Wrote ${n} summar${n === 1 ? 'y' : 'ies'} to ${planPath(root)}`);
+    if (res.usage) {
+      console.log(`Tokens: ${res.usage.input_tokens} in, ${res.usage.output_tokens} out`);
+    }
+    if (res.skipped.length) console.log(`Skipped ${res.skipped.length} (binary, empty, or missing).`);
+    return;
+  }
+
+  // ---- status ------------------------------------------------------------
+  if (cmd === 'status') {
+    const s = scan(root, scanOpts(opts));
+    const plan = loadPlan(root);
+    const { ops, problems, stats } = resolvePlan(s, plan);
+    console.log(`Root:     ${root}`);
+    console.log(
+      `Scanned:  ${s.counts.nodes} entries (${s.counts.dirs} dirs, ${s.counts.files} files, ${formatBytes(
+        s.counts.bytes
+      )})${s.truncated ? ' [truncated -- raise --max-nodes]' : ''}`
+    );
+    console.log(`Git:      ${s.git ? 'yes' : 'no'}`);
+    console.log(`Plan:     ${plan.savedAt ? `saved ${plan.savedAt}` : 'none yet'}`);
+    console.log(`Pending:  ${ops.length} operation(s), ${stats.touched} node(s) touched`);
+    if (problems.length) {
+      console.log(`Problems: ${problems.length}`);
+      for (const p of problems) console.log(`  - ${p.message}`);
+    }
+    const undos = listUndoScripts(root);
+    console.log(`Undo:     ${undos.length ? `${undos.length} script(s), latest ${undos[0]}` : 'none'}`);
+    const summaries = Object.keys(plan.summaries || {}).length;
+    console.log(`Summaries: ${summaries || 'none'}`);
+    return;
+  }
+
+  // ---- serve (default) ---------------------------------------------------
+  const { server, token, scan: initial } = createReorgServer({
+    root,
+    allowApply: !!opts.allowApply,
+  });
+  const port = await listen(server, Number.isFinite(opts.port) ? opts.port : 7777);
+  const url = `http://127.0.0.1:${port}/?token=${token}`;
+
+  console.log(`reorg  ${root}`);
+  console.log(
+    `       ${initial.counts.nodes} entries, ${formatBytes(initial.counts.bytes)}${
+      initial.git ? ', git-aware' : ''
+    }${initial.truncated ? ' (truncated -- raise --max-nodes)' : ''}`
+  );
+  console.log(`\n  ${url}\n`);
+  if (!opts.allowApply) {
+    console.log('The browser can plan and dry-run only. To apply:');
+    console.log(`  reorg apply ${root === process.cwd() ? '' : root} --yes`.replace(/\s+/g, ' '));
+    console.log('Or restart with --allow-apply to enable the Apply button.\n');
+  }
+  console.log('Ctrl-C to stop.');
+  if (opts.open !== false) openBrowser(url);
+
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, () => {
+      server.close(() => process.exit(0));
+      // Don't hang on a wedged keep-alive connection.
+      setTimeout(() => process.exit(0), 500).unref();
+    });
+  }
+}
+
+main().catch((e) => {
+  console.error(`reorg: ${e.message}`);
+  process.exit(1);
+});
