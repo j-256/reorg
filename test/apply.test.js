@@ -4,7 +4,16 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  existsSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  lstatSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -263,6 +272,89 @@ test('an empty op list is a clean no-op, not an error', () => {
   const res = apply(root, [], { dryRun: false, stamp: 'T10' });
   assert.equal(res.applied, 0);
   assert.equal(res.problems.length, 0);
+});
+
+test('a broken symlink moves and round-trips instead of aborting the batch', () => {
+  // Found while test-driving a real scratch directory. existsSync() and shell -e
+  // both follow symlinks, so a dangling link reads as absent -- which made the
+  // drift check call it "gone since the scan" and refuse the whole plan, over an
+  // entry sitting right there. Scratch directories are full of these.
+  const root = box({ 'keep.txt': 'keep', 'real.txt': 'real' });
+  symlinkSync('/nonexistent/nowhere', join(root, 'dangling'));
+  symlinkSync('real.txt', join(root, 'alias'));
+
+  const s = scan(root);
+  assert.equal(s.nodes.find((n) => n.name === 'dangling').kind, 'link');
+  assert.match(s.nodes.find((n) => n.name === 'dangling').meta, /nowhere/);
+
+  const { ops, problems } = resolve(
+    s,
+    planWith({
+      created: [{ id: 'new:1', cur: { name: 'links', parentId: '.' } }],
+      overrides: [
+        { id: 'dangling', cur: { name: 'dangling', parentId: 'new:1' } },
+        { id: 'alias', cur: { name: 'alias', parentId: 'new:1' } },
+      ],
+    })
+  );
+  assert.deepEqual(problems, []);
+
+  const res = apply(root, ops, { dryRun: false, stamp: 'T14' });
+  assert.deepEqual(res.problems, [], 'a dangling link must not abort the batch');
+  assert.equal(res.applied, 3);
+  assert.ok(lstatSync(join(root, 'links/dangling')).isSymbolicLink(), 'still a link, not dereferenced');
+  assert.ok(lstatSync(join(root, 'links/alias')).isSymbolicLink());
+
+  execFileSync('bash', [res.undoPath], { stdio: 'ignore' });
+  assert.ok(lstatSync(join(root, 'dangling')).isSymbolicLink(), 'undo restores the broken link too');
+  assert.equal(readFileSync(join(root, 'real.txt'), 'utf8'), 'real', 'the target was never touched');
+});
+
+test('a symlink to a directory is never descended into', () => {
+  // Following it would double-count the tree, or loop forever on a self-reference.
+  const root = box({ 'real/a.txt': 'a', 'real/b.txt': 'b' });
+  symlinkSync(join(root, 'real'), join(root, 'mirror'));
+  symlinkSync(join(root, '.'), join(root, 'selfref'));
+
+  const s = scan(root);
+  assert.equal(s.nodes.find((n) => n.name === 'mirror').kind, 'link');
+  assert.equal(s.nodes.filter((n) => n.parentId === 'mirror').length, 0);
+  assert.equal(s.nodes.filter((n) => n.parentId === 'selfref').length, 0, 'no infinite recursion');
+  assert.equal(s.nodes.filter((n) => n.kind === 'file').length, 2, 'each real file counted once');
+});
+
+test('a big directory collapses on its own weight, whatever it is called', () => {
+  // The real-world case this exists for: an unpacked release archive with an
+  // unguessable name. A name-based list will never catch those, and without a
+  // size rule one such directory floods the tree with thousands of rows that
+  // bury everything you actually wanted to triage.
+  const files = { 'keep.txt': 'keep' };
+  for (let i = 0; i < 60; i++) files[`20260630_ci_release_candidate/f${i}.txt`] = 'x';
+  const root = box(files);
+
+  const s = scan(root, { collapseOver: 20 });
+  const big = s.nodes.find((n) => n.id === '20260630_ci_release_candidate');
+  assert.ok(big.collapsedSubtree, 'collapsed despite an unrecognized name');
+  assert.equal(big.files, 60, 'reports a full, honest tally -- not the probe budget');
+  assert.ok(!s.nodes.some((n) => n.id.startsWith('20260630_ci_release_candidate/')), 'children not emitted');
+  assert.ok(
+    s.collapsed.some((c) => c.id === '20260630_ci_release_candidate'),
+    'and says what it declined to expand, so the omission is visible'
+  );
+  assert.ok(s.nodes.some((n) => n.id === 'keep.txt'), 'small entries still listed');
+});
+
+test('--all descends into a directory the size rule would collapse', () => {
+  const files = {};
+  for (let i = 0; i < 30; i++) files[`bulk/f${i}.txt`] = 'x';
+  const root = box(files);
+
+  const collapsed = scan(root, { collapseOver: 10 });
+  assert.ok(collapsed.nodes.find((n) => n.id === 'bulk').collapsedSubtree);
+
+  const expanded = scan(root, { collapseOver: 10, all: true });
+  assert.ok(!expanded.nodes.find((n) => n.id === 'bulk').collapsedSubtree, 'all: descends anyway');
+  assert.equal(expanded.nodes.filter((n) => n.id.startsWith('bulk/')).length, 30);
 });
 
 test('retiring an applied plan stops it colliding with what it just created', () => {

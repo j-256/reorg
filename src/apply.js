@@ -11,13 +11,28 @@
 //     leaves a way back.
 //  5. Inside a git repo, tracked paths move with `git mv` so history follows.
 
-import { existsSync, mkdirSync, renameSync, writeFileSync, chmodSync, statSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync, chmodSync, statSync, lstatSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname, relative } from 'node:path';
 import { OP, describeOp } from './plan.js';
 import { ensureStateDir, stateDir, logLine, STATE_DIR } from './state.js';
 
 const TRASH_DIR = 'trash';
+
+// Presence check that does NOT follow symlinks. `existsSync` resolves the target,
+// so a broken symlink reads as absent -- and scratch directories are full of them
+// (a link to a deleted checkout, a dangling firmlink). Treating one as "gone since
+// the scan" would abort an entire batch over an entry that is sitting right there
+// and moves perfectly well. What matters here is whether the path is occupied, not
+// whether what it points at resolves.
+function pathExists(p) {
+  try {
+    lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
 // Where the undo script parks cycle members while it unwinds a swap. Distinct
 // from the forward run's `stage/` so a re-run of either can't collide.
 const STAGE_UNDO_DIR = 'unstage';
@@ -62,7 +77,7 @@ export function checkDrift(root, ops) {
   for (const op of ops) {
     if (op.op === OP.MKDIR) {
       const abs = join(root, op.to);
-      if (existsSync(abs)) {
+      if (pathExists(abs)) {
         // Already there: harmless, mkdir -p semantics. Only a file in the way is fatal.
         try {
           if (!statSync(abs).isDirectory()) {
@@ -77,14 +92,14 @@ export function checkDrift(root, ops) {
     }
     if (op.op === OP.MOVE || op.op === OP.STAGE || op.op === OP.UNSTAGE) {
       const src = join(root, op.from);
-      if (!existsSync(src) && !willExist.has(op.from)) {
+      if (!pathExists(src) && !willExist.has(op.from)) {
         problems.push(`${op.from} no longer exists (moved or deleted since the scan).`);
       }
       // Staging destinations live under .reorg/ and are created by this run, so
       // they are never pre-existing; only real destinations can be occupied.
       if (op.op !== OP.STAGE) {
         const dst = join(root, op.to);
-        if (existsSync(dst) && !willVacate.has(op.to)) {
+        if (pathExists(dst) && !willVacate.has(op.to)) {
           problems.push(`${op.to} already exists; refusing to overwrite it.`);
         }
       }
@@ -94,7 +109,7 @@ export function checkDrift(root, ops) {
     }
     if (op.op === OP.TRASH) {
       const abs = join(root, op.to);
-      if (!existsSync(abs) && !willExist.has(op.to)) {
+      if (!pathExists(abs) && !willExist.has(op.to)) {
         problems.push(`${op.to} no longer exists (nothing to trash).`);
       }
       willVacate.add(op.to);
@@ -130,8 +145,11 @@ export function buildUndoScript(ops, stamp, opts = {}) {
     'moved=0; skipped=0',
     '',
     'unmove() { # unmove <current> <original>',
-    '  if [ ! -e "$1" ]; then printf "  skip (missing): %s\\n" "$1"; skipped=$((skipped+1)); return 0; fi',
-    '  if [ -e "$2" ]; then printf "  skip (occupied): %s\\n" "$2"; skipped=$((skipped+1)); return 0; fi',
+    // -e follows symlinks, so a broken link would read as missing here and be
+    // skipped -- stranding a perfectly movable entry. Test -L as well, on both
+    // sides: presence is about the path, not about what it resolves to.
+    '  if [ ! -e "$1" ] && [ ! -L "$1" ]; then printf "  skip (missing): %s\\n" "$1"; skipped=$((skipped+1)); return 0; fi',
+    '  if [ -e "$2" ] || [ -L "$2" ]; then printf "  skip (occupied): %s\\n" "$2"; skipped=$((skipped+1)); return 0; fi',
     '  mkdir -p "$(dirname "$2")"',
     '  mv -- "$1" "$2" && printf "  %s -> %s\\n" "$1" "$2" && moved=$((moved+1))',
     '}',
