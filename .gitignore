@@ -1,0 +1,7 @@
+# reorg writes plan state and undo scripts into .reorg/ inside the directory
+# being reorganized. It self-ignores (see src/state.js), but belt and braces:
+.reorg/
+
+node_modules/
+*.log
+.DS_Store
