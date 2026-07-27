@@ -10,7 +10,8 @@
  */
 
 import { api, setToken } from './lib/api.js';
-import { store, ROOT_ID, childrenOf, isDir, changesOf, pathOf, isDescendant } from './lib/store.js';
+import { store, ROOT_ID, childrenOf, isDir, changesOf, pathOf } from './lib/store.js';
+import * as edit from './lib/plan-edit.js';
 import { renderTree, revealNode } from './lib/tree.js';
 import {
   renderSide,
@@ -192,59 +193,22 @@ function syncToggles() {
 
 /* ---------------------------------------------------------------- actions */
 export function setAllCollapsed(v) {
-  for (const n of store.nodes.values()) if (isDir(n)) n.collapsed = v;
+  edit.setAllCollapsed(v);
   renderAll();
 }
 
 export function toggleCollapse(n, deep) {
-  const target = !n.collapsed;
-  if (deep) {
-    const walk = (node) => {
-      node.collapsed = target;
-      for (const c of childrenOf(node.id)) if (isDir(c)) walk(c);
-    };
-    walk(n);
-  } else {
-    n.collapsed = target;
-  }
+  edit.toggleCollapse(n.id, deep);
   renderAll();
 }
 
 export function toggleEvict(n) {
-  n.evicted = !n.evicted;
-  // Cascade: trashing a folder trashes what is inside it, which is both what
-  // people expect and what keeps the plan resolvable (the server rejects a
-  // trashed dir that still holds kept children).
-  const walk = (node, v) => {
-    for (const c of childrenOf(node.id)) {
-      c.evicted = v;
-      walk(c, v);
-    }
-  };
-  walk(n, n.evicted);
+  edit.toggleEvict(n.id);
   markDirty();
 }
 
 export function addDir(parentId) {
-  const id = 'new:' + ++store.seq;
-  store.nodes.set(id, {
-    id,
-    name: 'new-folder',
-    kind: 'dir',
-    git: null,
-    meta: null,
-    bytes: null,
-    files: null,
-    mtime: null,
-    nestedRepo: false,
-    collapsedSubtree: false,
-    orig: null,
-    cur: { name: 'new-folder', parentId },
-    evicted: false,
-    collapsed: false,
-  });
-  const parent = store.nodes.get(parentId);
-  if (parent) parent.collapsed = false;
+  const { id } = edit.addDir(parentId);
   markDirty();
   requestAnimationFrame(() => {
     const nameEl = document.querySelector(`.row[data-id="${cssEsc(id)}"] .name`);
@@ -254,12 +218,7 @@ export function addDir(parentId) {
 }
 
 export function deleteCreated(n) {
-  if (n.orig) return;
-  // Reparent anything inside to where the created folder sat, so nothing is
-  // orphaned by removing a container the user invented and then abandoned.
-  for (const c of childrenOf(n.id)) c.cur.parentId = n.cur.parentId;
-  store.nodes.delete(n.id);
-  store.notes = store.notes.filter((x) => x.target !== n.id);
+  if (!edit.deleteCreated(n.id).changed) return;
   markDirty();
 }
 
@@ -276,14 +235,11 @@ export function beginRename(n, nameEl) {
     nameEl.removeAttribute('contenteditable');
     nameEl.removeEventListener('keydown', onKey);
     nameEl.removeEventListener('blur', onBlur);
-    const val = nameEl.textContent.trim();
-    if (commit && val && val !== n.cur.name && isValidName(val)) {
-      n.cur.name = val;
+    const res = commit ? edit.renameNode(n.id, nameEl.textContent) : { ok: true, changed: false };
+    if (res.changed) {
       markDirty();
     } else {
-      if (commit && val && !isValidName(val)) {
-        toast('A name cannot contain "/" or start with a dot-dot.', true);
-      }
+      if (!res.ok) toast(res.message, true);
       nameEl.textContent = n.cur.name;
       renderAll();
     }
@@ -303,22 +259,10 @@ export function beginRename(n, nameEl) {
   nameEl.addEventListener('blur', onBlur);
 }
 
-function isValidName(s) {
-  return !s.includes('/') && s !== '.' && s !== '..' && !s.includes('\0');
-}
-
 export function moveNode(srcId, targetId) {
-  const src = store.nodes.get(srcId);
-  if (!src || srcId === targetId) return;
-  if (isDescendant(targetId, srcId)) {
-    toast('A folder cannot be moved inside itself.', true);
-    return;
-  }
-  if (src.cur.parentId === targetId) return; // out-and-back is a no-op
-  src.cur.parentId = targetId;
-  const t = store.nodes.get(targetId);
-  if (t) t.collapsed = false;
-  markDirty();
+  const res = edit.moveNode(srcId, targetId);
+  if (!res.ok) return toast(res.message, true);
+  if (res.changed) markDirty();
 }
 
 export function addNote(targetId) {
