@@ -116,12 +116,7 @@ Summaries are stored in the plan and keyed by path, so they survive a rescan.
 
 ![Triage panel: each candidate carries the signals that flagged it and a plain-language reason](docs/triage.png)
 
-**It ranks names and structure, not age.** That is the opposite of the obvious design, and it is deliberate. Measured against a real scratch directory, mtime barely correlated with disposability:
-
-- The clearly-disposable entries – a `-backup-20260425` directory, a `.zip` still sitting beside its unpacked copy, a downloaded `.dmg` – had ages spanning 12 to 586 days. Age separated them from nothing, and seven of eight `-backup-`/`-dryrun-` directories were all *12 days old*, so an age sort would have called them active.
-- What age surfaced instead were keepers: an example image kept on purpose for two years, a reference screenshot, a script still in use.
-
-A name is frequently a direct statement of intent – someone wrote "backup" or "dryrun" because that is what the thing was for. So the signals are:
+**It ranks names and structure, not age.** That is the opposite of the obvious design, and it is deliberate: a name is frequently a direct statement of intent – someone wrote "backup" or "dryrun" because that is what the thing was for – where mtime turns out to predict almost nothing. The signals are:
 
 | Signal | Why |
 |---|---|
@@ -135,6 +130,13 @@ A name is frequently a direct statement of intent – someone wrote "backup" or 
 Position matters, because the same word can name a subject rather than a status. `work-backup-20260317` is a backup; `backup-strategy-notes.md` is a document about backups, and `all-mail-including-spam-and-trash.mbox` is three gigabytes of actual mail. Only trailing markers count – both of those were real false positives, and flagging 3 GB of someone's mail as trash is how a suggestion list loses its reader.
 
 Emptiness is deliberately not a signal: empty directories are often intentional (mount points, placeholders) and cost nothing to keep.
+
+### Why age is not a signal
+
+The screenshots above are a synthetic directory built by `npm run screenshots`, so everything in them is minutes old. The ranking was tuned against a different sample – one real, long-neglected scratch directory – where mtime and disposability turned out to be close to unrelated:
+
+- The clearly-disposable entries – a `-backup-20260425` directory, a `.zip` still sitting beside its unpacked copy, a downloaded `.dmg` – had ages spanning 12 to 586 days, so age separated them from nothing. Seven of eight `-backup-`/`-dryrun-` directories were all *12 days old*: an age sort would have called them active work.
+- What age surfaced at the top instead were keepers – an example image kept on purpose for two years, a reference screenshot, a script still in use.
 
 Age is still shown on every row, for context. It is just never what sorts them.
 
