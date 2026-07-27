@@ -1,6 +1,6 @@
 # reorg
 
-Reorganize a messy directory by dragging it into shape, then apply the plan with one command -- and an undo script.
+Reorganize a messy directory by dragging it into shape, then apply the plan with one command – and an undo script.
 
 ```
 npx reorg-cli ~/Downloads
@@ -16,7 +16,7 @@ No runtime dependencies, no build step, no config file. One Node script and a pa
 
 Cleaning up a directory is two jobs that get tangled together: *deciding* what the shape should be, and *executing* a pile of `mv` commands without breaking anything. Doing both at once in a terminal means you lose the plan halfway through, or you discover the conflict after the third move.
 
-reorg splits them. You do all the deciding in a view where the whole tree is visible and every change is reversible with a keystroke. When the shape looks right, the tool works out the operations -- in a correct order, with collisions caught up front -- and executes them as one checked batch that it can also undo.
+reorg splits them. You do all the deciding in a view where the whole tree is visible and every change is reversible with a keystroke. When the shape looks right, the tool works out the operations – in a correct order, with collisions caught up front – and executes them as one checked batch that it can also undo.
 
 It is useful for a `~/Downloads` that got away from you, a repo whose layout no longer matches how you think about it, or a scratch directory you have been meaning to triage for a year.
 
@@ -29,7 +29,7 @@ git clone https://github.com/j-256/reorg
 cd reorg && npm link      # then: reorg <dir>
 ```
 
-Requires Node 22 or newer -- the oldest release still receiving security updates. There are no runtime dependencies: `package.json` has an empty `dependencies` block and that is deliberate.
+Requires Node 22 or newer – the oldest release still receiving security updates. There are no runtime dependencies: `package.json` has an empty `dependencies` block and that is deliberate.
 
 ## Tests
 
@@ -82,7 +82,7 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 
 - **Dry run is the default.** `reorg apply` prints and exits. Only `--yes` moves anything. The browser cannot apply at all unless you started it with `--allow-apply`.
 - **Nothing is deleted.** "Trash" moves into `.reorg/trash/<run>/`. Emptying that is a separate decision you make yourself.
-- **Drift aborts the whole batch.** Every source path is checked to still exist and every destination to be free *before* the first move. If the tree changed since the scan, nothing is applied -- not "nothing further", nothing at all.
+- **Drift aborts the whole batch.** Every source path is checked to still exist and every destination to be free *before* the first move. If the tree changed since the scan, nothing is applied – not "nothing further", nothing at all.
 - **An undo script is written before execution starts**, so even a crash mid-run leaves a way back. It is guarded per step, so running it after a partial apply undoes only what happened.
 - **Collisions are caught at plan time**, not discovered at move time: two entries landing on one path, a folder marked for trash that still holds things you kept, a folder dragged inside itself.
 - **`git mv` for tracked files**, so history follows the move. (Git refuses this on a fully-untracked directory; reorg falls back to a plain rename there.)
@@ -92,7 +92,7 @@ Your plan lives in `.reorg/plan.json`, which is a diff against the scan rather t
 
 ## File summaries
 
-Half of triage is remembering what a file *is*. `reorg summarize` labels each one with a single line -- "nightly S3 sync of /var/data", not "a shell script" -- and the planner shows it inline next to the filename.
+Half of triage is remembering what a file *is*. `reorg summarize` labels each one with a single line – "nightly S3 sync of /var/data", not "a shell script" – and the planner shows it inline next to the filename.
 
 Two ways to get them, and the default needs no API key:
 
@@ -106,7 +106,7 @@ reorg summarize --ingest ~/Downloads
 ANTHROPIC_API_KEY=sk-... reorg summarize ~/Downloads
 ```
 
-The API path batches files (about a dozen per request), sends only the first few KB of each, skips binaries and empty files, and defaults to Haiku because this is a classification job. Override with `--model`. It uses `fetch` against the documented HTTP API -- no SDK dependency.
+The API path batches files (about a dozen per request), sends only the first few KB of each, skips binaries and empty files, and defaults to Haiku because this is a classification job. Override with `--model`. It uses `fetch` against the documented HTTP API – no SDK dependency.
 
 Summaries are stored in the plan and keyed by path, so they survive a rescan.
 
@@ -118,10 +118,10 @@ Summaries are stored in the plan and keyed by path, so they survive a rescan.
 
 **It ranks names and structure, not age.** That is the opposite of the obvious design, and it is deliberate. Measured against a real scratch directory, mtime barely correlated with disposability:
 
-- The clearly-disposable entries -- a `-backup-20260425` directory, a `.zip` still sitting beside its unpacked copy, a downloaded `.dmg` -- had ages spanning 12 to 586 days. Age separated them from nothing, and seven of eight `-backup-`/`-dryrun-` directories were all *12 days old*, so an age sort would have called them active.
+- The clearly-disposable entries – a `-backup-20260425` directory, a `.zip` still sitting beside its unpacked copy, a downloaded `.dmg` – had ages spanning 12 to 586 days. Age separated them from nothing, and seven of eight `-backup-`/`-dryrun-` directories were all *12 days old*, so an age sort would have called them active.
 - What age surfaced instead were keepers: an example image kept on purpose for two years, a reference screenshot, a script still in use.
 
-A name is frequently a direct statement of intent -- someone wrote "backup" or "dryrun" because that is what the thing was for. So the signals are:
+A name is frequently a direct statement of intent – someone wrote "backup" or "dryrun" because that is what the thing was for. So the signals are:
 
 | Signal | Why |
 |---|---|
@@ -132,7 +132,7 @@ A name is frequently a direct statement of intent -- someone wrote "backup" or "
 | a bare `.git` clone | a mirror kept as a one-off safety copy |
 | bulky | worth a decision purely for what it costs to keep |
 
-Position matters, because the same word can name a subject rather than a status. `work-backup-20260317` is a backup; `backup-strategy-notes.md` is a document about backups, and `all-mail-including-spam-and-trash.mbox` is three gigabytes of actual mail. Only trailing markers count -- both of those were real false positives, and flagging 3 GB of someone's mail as trash is how a suggestion list loses its reader.
+Position matters, because the same word can name a subject rather than a status. `work-backup-20260317` is a backup; `backup-strategy-notes.md` is a document about backups, and `all-mail-including-spam-and-trash.mbox` is three gigabytes of actual mail. Only trailing markers count – both of those were real false positives, and flagging 3 GB of someone's mail as trash is how a suggestion list loses its reader.
 
 Emptiness is deliberately not a signal: empty directories are often intentional (mount points, placeholders) and cost nothing to keep.
 
@@ -145,7 +145,7 @@ Worth knowing, because it explains why the output looks the way it does.
 Every entry has a stable id (its path at scan time) and two positions: the frozen original and the live one you edit. The diff between them is the plan. Resolving it produces operations in dependency order:
 
 1. **`mkdir`** for folders you invented, shallowest first.
-2. **`mv`**, but only for entries whose *own* position changed. Moving `a/` to `b/a/` relocates everything inside it implicitly -- emitting a second move for `a/x` would fail, because by then its source is gone. Destinations are final-tree paths, so each entry moves once.
+2. **`mv`**, but only for entries whose *own* position changed. Moving `a/` to `b/a/` relocates everything inside it implicitly – emitting a second move for `a/x` would fail, because by then its source is gone. Destinations are final-tree paths, so each entry moves once.
 3. **`trash`** last, at each entry's post-move location.
 
 Move ordering is a topological sort over two constraints: vacate before occupy (if X lands where Y still is, Y goes first), and parent before child (if X lands inside where Y is going, Y arrives first). A cycle between them means no order works, which is when staging kicks in.
@@ -167,7 +167,7 @@ web/               the planner: tree, drag and drop, preview, review
 test/              unit tests for the resolver, integration tests on real temp dirs
 ```
 
-`src/plan.js` is deliberately pure so the risky decisions are testable without a filesystem. The integration tests do the opposite -- real directories, real git repos, real `bash undo-*.sh` round trips -- because a resolver that is right on paper and wrong on disk is worthless.
+`src/plan.js` is deliberately pure so the risky decisions are testable without a filesystem. The integration tests do the opposite – real directories, real git repos, real `bash undo-*.sh` round trips – because a resolver that is right on paper and wrong on disk is worthless.
 
 ```bash
 npm test
