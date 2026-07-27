@@ -212,11 +212,21 @@ npm run retag
 
 That moves the tag to whatever `main` currently points at, so push the fix first. `retag` runs the same guard as `npm version` and refuses from a feature branch or an unpushed `main`, since either would tag a commit the release then could not verify.
 
+`retag` only works when the tag actually moves. If the tag already points at the commit you want – a run that failed for a reason outside the repo, say a registry outage – the force-push is a no-op, git prints `Everything up-to-date`, and **no workflow runs**: Actions fires on a ref change, and nothing changed. Re-run the same commit by dispatching against the tag instead, which takes the tag's tree and skips nothing:
+
+```bash
+gh workflow run release.yml --ref v0.1.0 -f dry_run=false
+```
+
+The `dry_run=false` is required – dispatch defaults to a dry run, which publishes nothing. Unlike a dispatch from a branch, this one has a tag, so both tag checks run and the GitHub release is still cut.
+
 Once a version is on the registry it is spent; npm does not allow republishing it. A failure after that point means the package is live and the fix is the next patch, not a retag. The GitHub release is therefore cut whenever the publish succeeded, even if the registry smoke test then fails – a slow-propagating registry should not also cost you the release.
 
 A publish sends this README to the registry as plaintext, on every release rather than only the first, and a WAF sits in front of `registry.npmjs.org` that rejects request bodies matching attack signatures. So prose here can fail a release: a path-traversal example was once enough. npm reports the block as `E403` with boilerplate about "your security policy", naming neither the WAF nor the cause, so it reads like a credential problem. To tell them apart, PUT the same document with *no* credentials – the WAF answers before npm authenticates, so an HTML 403 indicts the payload while JSON clears it, and an unauthenticated request cannot publish.
 
-Publishing uses an `NPM_TOKEN` secret scoped to this package alone. npm's trusted publishing (OIDC) would remove the token entirely, but it cannot perform a package's *first* publish – npmjs.com only exposes those settings for a package that already exists. So once a version is on the registry, the token can be retired: register `release.yml` as a trusted publisher, drop the `NODE_AUTH_TOKEN` line from the publish step, and revoke the secret. The two mechanisms coexist safely, because npm falls back to the configured credential whenever the OIDC exchange does not succeed.
+Publishing carries no credential at all. npm knows this repository and `release.yml` as a trusted publisher, so it exchanges the workflow's OIDC token for a short-lived publish token – nothing long-lived to leak, rotate, or forget. Two consequences worth knowing: renaming or moving this workflow file breaks authentication until the publisher is re-registered on npmjs.com, and a fork cannot publish, because the OIDC claim names this repository.
+
+Trusted publishing cannot perform a package's *first* publish, though – npmjs.com only exposes the setting for a package that already exists – so `0.1.0` went out with a short-lived granular token, which was then revoked. Anyone bootstrapping a *new* package from this workflow has to do the same: publish once with an `NPM_TOKEN` secret and `NODE_AUTH_TOKEN` set on the publish step, then register the publisher and remove both.
 
 ## License
 

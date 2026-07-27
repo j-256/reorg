@@ -8,8 +8,8 @@ name: Release
 # tag push is what lands here. ci.yml stays a pure test gate and knows nothing
 # about publishing.
 #
-# The filename is load-bearing: npm pins a trusted publisher to one exact
-# workflow filename, so renaming this file breaks the OIDC migration.
+# The filename is load-bearing: npm pins the trusted publisher to one exact
+# workflow filename, so renaming this file breaks authentication.
 
 on:
   push:
@@ -23,7 +23,7 @@ on:
 
 permissions:
   contents: write # create the GitHub release
-  id-token: write # provenance attestation
+  id-token: write # authenticate to npm, and sign the provenance attestation
 
 jobs:
   release:
@@ -53,8 +53,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          # Writes the .npmrc that picks up NODE_AUTH_TOKEN below. Without it
-          # the token is ignored and the publish fails with ENEEDAUTH.
+          # Pins the registry the publish talks to, which is also the registry
+          # npm exchanges the OIDC token against. Without it the publish targets
+          # whatever default is configured and trusted publishing does not apply.
           registry-url: https://registry.npmjs.org
 
       - name: Verify the tag matches package.json version
@@ -118,6 +119,14 @@ jobs:
           ./node_modules/.bin/reorg apply sample
           test -f sample/keep.txt
 
+      # No credential here on purpose. npm is configured with this repo and this
+      # workflow filename as a trusted publisher, so it exchanges the Actions
+      # OIDC token (id-token: write, above) for a short-lived publish token. That
+      # leaves nothing long-lived to leak or rotate. Note the exchange only ever
+      # ADDS auth -- npm's oidc helper returns quietly on any failure rather than
+      # throwing, so a broken trusted-publisher config surfaces as an auth error
+      # from the publish itself, not as a confusing fallback.
+      #
       # --access public is mandatory on a first publish, not decoration: npm
       # treats the 404 from a not-yet-published package as "private" and refuses
       # to generate provenance without it. Harmless on every later release.
@@ -136,7 +145,6 @@ jobs:
           echo "npm publish $*"
           npm publish "$@"
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           DRY_RUN: ${{ inputs.dry_run }}
 
       # Distinguishes "we uploaded a tarball" from "a user can install it",
