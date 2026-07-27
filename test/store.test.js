@@ -322,6 +322,42 @@ test('git tinting defaults on inside a repo and off outside one', () => {
   assert.equal(store.ui.git, false);
 });
 
+test('theme cycles auto -> dark -> light and back', () => {
+  load();
+  assert.equal(edit.currentTheme(), 'auto', 'a plan with no theme follows the system');
+
+  assert.equal(edit.cycleTheme().theme, 'dark');
+  assert.equal(edit.currentTheme(), 'dark');
+  assert.equal(edit.cycleTheme().theme, 'light');
+  assert.equal(edit.cycleTheme().theme, 'auto', 'the cycle returns to following the system');
+});
+
+test('auto is stored as absent, so a pre-existing plan needs no migration', () => {
+  // The CSS distinguishes "no override" from an explicit choice with
+  // :not([data-theme]), so auto must not serialize as the string 'auto'.
+  load();
+  edit.cycleTheme(); // dark
+  assert.equal(store.serialize().ui.theme, 'dark');
+
+  edit.cycleTheme(); // light
+  edit.cycleTheme(); // auto
+  assert.equal('theme' in store.serialize().ui, false, 'auto leaves no key behind');
+});
+
+test('an explicit theme survives a save and reload', () => {
+  load();
+  edit.cycleTheme(); // dark
+  const saved = store.serialize();
+
+  load(TREE, saved);
+  assert.equal(edit.currentTheme(), 'dark');
+});
+
+test('an unrecognized stored theme falls back to auto rather than breaking', () => {
+  load(TREE, { ui: { theme: 'solarized' } });
+  assert.equal(edit.currentTheme(), 'auto');
+});
+
 /* ---- round trips against the real server-side resolver -------------------- */
 // These are the tests that actually matter: they prove the plan the browser
 // builds means what the browser thinks it means once src/plan.js reads it.

@@ -2,7 +2,15 @@
    colour reserved for the two things that matter: what changed, and what git
    thinks. Everything else stays out of the way. */
 
-:root {
+/* Dark is the default and the light palette is the override, so the two live in
+   mixins applied three ways: unconditionally (dark), under the OS preference
+   (light), and under an explicit data-theme when the toolbar overrides the OS.
+   color-scheme matters as much as the variables -- without it the browser paints
+   scrollbars, form controls, and the canvas in its own light scheme regardless of
+   what these say, which reads as a half-light page. */
+
+:root,
+:root[data-theme='dark'] {
   --bg: #0f1012;
   --bg-2: #16181c;
   --panel: #1b1e23;
@@ -23,12 +31,17 @@
   --git-untracked: #ffb454;
   --git-nested: #f0883e;
 
+  color-scheme: dark;
+}
+
+:root {
   --row-h: 24px;
   --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* The OS asks for light, and nothing has overridden it. */
 @media (prefers-color-scheme: light) {
-  :root {
+  :root:not([data-theme]) {
     --bg: #fbfaf7;
     --bg-2: #f2f0ea;
     --panel: #fff;
@@ -46,7 +59,35 @@
     --git-ignored: #a5a19a;
     --git-untracked: #b26b00;
     --git-nested: #b4530f;
+
+    color-scheme: light;
   }
+}
+
+/* Explicitly chosen light, whatever the OS says. Duplicated rather than shared
+   with the block above because a media query cannot be reused as a selector, and
+   pulling both into a @supports/@layer indirection would cost more clarity than
+   the repetition does. */
+:root[data-theme='light'] {
+  --bg: #fbfaf7;
+  --bg-2: #f2f0ea;
+  --panel: #fff;
+  --panel-2: #f6f4ef;
+  --ink: #1d1c1a;
+  --ink-dim: #605d58;
+  --ink-faint: #96928a;
+  --rule: #ddd9d0;
+  --accent: #b26b00;
+  --moved: #1667c9;
+  --renamed: #7a3fb8;
+  --new: #17794a;
+  --trashed: #c22c2c;
+  --git-tracked: #17794a;
+  --git-ignored: #a5a19a;
+  --git-untracked: #b26b00;
+  --git-nested: #b4530f;
+
+  color-scheme: light;
 }
 
 * { box-sizing: border-box; }

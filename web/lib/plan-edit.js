@@ -121,6 +121,23 @@ export function deleteCreated(id) {
   return OK;
 }
 
+/* Theme is a three-state cycle rather than a boolean: "follow the OS" has to stay
+   reachable, because a toggle that can only be dark or light silently stops
+   tracking the system once touched. `auto` is stored as absent rather than as the
+   string, so a plan written before this existed loads as auto without migration. */
+export const THEMES = Object.freeze(['auto', 'dark', 'light']);
+
+export function currentTheme() {
+  return THEMES.includes(store.ui.theme) ? store.ui.theme : 'auto';
+}
+
+export function cycleTheme() {
+  const next = THEMES[(THEMES.indexOf(currentTheme()) + 1) % THEMES.length];
+  if (next === 'auto') delete store.ui.theme;
+  else store.ui.theme = next;
+  return { ...OK, theme: next };
+}
+
 export function setAllCollapsed(v) {
   for (const n of store.nodes.values()) if (isDir(n)) n.collapsed = v;
   return OK;

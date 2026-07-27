@@ -52,6 +52,8 @@ In the planner:
 - **`/`** jumps to the filter box; wrap the query in slashes for a regex (`/\.log$/`).
 - **`?`** lists every key.
 
+Toolbar toggles persist in the plan, so the view you set up is the view you come back to: **git** tints rows by git status, **heat** draws a size bar on each row, and **theme** cycles `auto` (follow the system) through forced `dark` and `light`.
+
 Sibling order is *derived* (folders first, then natural sort), never stored. Dragging something out of a folder and back is a genuine no-op rather than a phantom "reordered" change.
 
 ## Safety

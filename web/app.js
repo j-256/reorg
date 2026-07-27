@@ -169,6 +169,14 @@ function buildToolbar() {
     },
     'heat'
   );
+  {
+    const b = mk('auto', 'theme: follow the system, or force dark or light', () => {
+      edit.cycleTheme();
+      applyTheme();
+      markDirty();
+    });
+    b.dataset.themeBtn = '';
+  }
   sep();
 
   mk('triage', 'entries that look disposable, ranked by name and structure (not age)', () => showTriage());
@@ -186,8 +194,25 @@ function buildToolbar() {
 function syncToggles() {
   document.body.classList.toggle('git-on', !!store.ui.git);
   document.body.classList.toggle('heat-on', !!store.ui.heat);
+  applyTheme();
   for (const b of document.querySelectorAll('.btn[data-toggle]')) {
     b.classList.toggle('on', !!store.ui[b.dataset.toggle]);
+  }
+}
+
+// `auto` removes the attribute entirely rather than setting it to "auto", because
+// the CSS distinguishes the two with :not([data-theme]) -- an attribute present
+// with any value means the OS preference has been overridden.
+function applyTheme() {
+  const theme = edit.currentTheme();
+  const root = document.documentElement;
+  if (theme === 'auto') root.removeAttribute('data-theme');
+  else root.setAttribute('data-theme', theme);
+
+  const btn = document.querySelector('.btn[data-theme-btn]');
+  if (btn) {
+    btn.textContent = theme;
+    btn.classList.toggle('on', theme !== 'auto');
   }
 }
 
