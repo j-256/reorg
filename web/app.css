@@ -17,17 +17,18 @@
   --panel-2: #22262d;
   --ink: #e6e4df;
   --ink-dim: #9a97a3;
-  --ink-faint: #625f6d;
+  --ink-faint: #9490a1;
   --rule: #2b2f37;
 
   --accent: #ffb454;
+  --accent-strong: #ffb454;
   --moved: #6fb5ff;
   --renamed: #c99bff;
   --new: #7fd4a3;
   --trashed: #ff6b6b;
 
   --git-tracked: #7fd4a3;
-  --git-ignored: #5e5b68;
+  --git-ignored: #84808f;
   --git-untracked: #ffb454;
   --git-nested: #f0883e;
 
@@ -48,16 +49,17 @@
     --panel-2: #f6f4ef;
     --ink: #1d1c1a;
     --ink-dim: #605d58;
-    --ink-faint: #96928a;
+    --ink-faint: #6e6a63;
     --rule: #ddd9d0;
-    --accent: #b26b00;
+    --accent: #9a5c00;
+    --accent-strong: #7a4900;
     --moved: #1667c9;
     --renamed: #7a3fb8;
     --new: #17794a;
     --trashed: #c22c2c;
     --git-tracked: #17794a;
-    --git-ignored: #a5a19a;
-    --git-untracked: #b26b00;
+    --git-ignored: #696560;
+    --git-untracked: #9a5c00;
     --git-nested: #b4530f;
 
     color-scheme: light;
@@ -75,16 +77,17 @@
   --panel-2: #f6f4ef;
   --ink: #1d1c1a;
   --ink-dim: #605d58;
-  --ink-faint: #96928a;
+  --ink-faint: #6e6a63;
   --rule: #ddd9d0;
-  --accent: #b26b00;
+  --accent: #9a5c00;
+  --accent-strong: #7a4900;
   --moved: #1667c9;
   --renamed: #7a3fb8;
   --new: #17794a;
   --trashed: #c22c2c;
   --git-tracked: #17794a;
-  --git-ignored: #a5a19a;
-  --git-untracked: #b26b00;
+  --git-ignored: #696560;
+  --git-untracked: #9a5c00;
   --git-nested: #b4530f;
 
   color-scheme: light;
@@ -137,7 +140,11 @@ body {
 .btn:hover { border-color: var(--ink-faint); }
 .btn:active { transform: translateY(1px); }
 .btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-.btn.on { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); color: var(--accent); }
+/* Text is --accent-strong rather than --accent: the label sits on a surface tinted
+   with the same colour, so reusing it for both leaves them a couple of steps apart
+   and under 4.5:1. In dark mode the two are identical, since a light accent on a
+   dark tint already clears it. */
+.btn.on { background: color-mix(in srgb, var(--accent) 18%, transparent); border-color: var(--accent); color: var(--accent-strong); }
 .btn.primary { border-color: var(--new); color: var(--new); }
 .btn.primary:hover { background: color-mix(in srgb, var(--new) 15%, transparent); }
 .btn.danger { border-color: var(--trashed); color: var(--trashed); }
