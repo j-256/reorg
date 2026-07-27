@@ -126,6 +126,8 @@ test('/api/head refuses paths that escape the scan root', async () => {
       'docs/../../etc/passwd',
       '/etc/passwd',
       './../package.json',
+      // The example the README cites, kept in step with it on purpose
+      '../../.ssh/id_rsa',
     ];
     for (const p of escapes) {
       const res = await s.call(`/api/head?path=${encodeURIComponent(p)}`);

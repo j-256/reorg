@@ -179,7 +179,12 @@ npm test
 
 ## The server
 
-`reorg` serves on loopback with a per-run token in the URL. That is not theatre: the API can read file contents and, with `--allow-apply`, move files. A token means another process on the machine, or a stray browser tab, cannot drive it. Path parameters are confined to the scan root, so `../../etc/passwd` is rejected rather than served.
+<!-- Keep the traversal example off `../../etc/`. npm sends this README to the
+     registry as plaintext, and the WAF in front of registry.npmjs.org rejects
+     that path as an attack signature -- npm then reports the block as a generic
+     E403 that names no cause. See ## Releasing. -->
+
+`reorg` serves on loopback with a per-run token in the URL. That is not theatre: the API can read file contents and, with `--allow-apply`, move files. A token means another process on the machine, or a stray browser tab, cannot drive it. Path parameters are confined to the scan root, so `../../.ssh/id_rsa` is rejected rather than served.
 
 ## Releasing
 
@@ -208,6 +213,8 @@ npm run retag
 That moves the tag to whatever `main` currently points at, so push the fix first. `retag` runs the same guard as `npm version` and refuses from a feature branch or an unpushed `main`, since either would tag a commit the release then could not verify.
 
 Once a version is on the registry it is spent; npm does not allow republishing it. A failure after that point means the package is live and the fix is the next patch, not a retag. The GitHub release is therefore cut whenever the publish succeeded, even if the registry smoke test then fails – a slow-propagating registry should not also cost you the release.
+
+A publish sends this README to the registry as plaintext, on every release rather than only the first, and a WAF sits in front of `registry.npmjs.org` that rejects request bodies matching attack signatures. So prose here can fail a release: a path-traversal example was once enough. npm reports the block as `E403` with boilerplate about "your security policy", naming neither the WAF nor the cause, so it reads like a credential problem. To tell them apart, PUT the same document with *no* credentials – the WAF answers before npm authenticates, so an HTML 403 indicts the payload while JSON clears it, and an unauthenticated request cannot publish.
 
 Publishing uses an `NPM_TOKEN` secret scoped to this package alone. npm's trusted publishing (OIDC) would remove the token entirely, but it cannot perform a package's *first* publish – npmjs.com only exposes those settings for a package that already exists. So once a version is on the registry, the token can be retired: register `release.yml` as a trusted publisher, drop the `NODE_AUTH_TOKEN` line from the publish step, and revoke the secret. The two mechanisms coexist safely, because npm falls back to the configured credential whenever the OIDC exchange does not succeed.
 
