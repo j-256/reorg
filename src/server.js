@@ -17,6 +17,7 @@ import { resolve as resolvePlan, describeOp } from './plan.js';
 import { apply } from './apply.js';
 import { summarize } from './summarize.js';
 import { looksTextual } from './text.js';
+import { analyze, ranked } from './signals.js';
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
 
@@ -108,6 +109,16 @@ export function createReorgServer({ root, allowApply = false, token = randomByte
       // ---- API: token-gated ------------------------------------------------
       const given = url.searchParams.get('token') || req.headers['x-reorg-token'];
       if (!tokenOk(token, given)) return sendJson(res, 403, { error: 'bad or missing token' });
+
+      // Ranked cleanup candidates. Name- and structure-based, never age-based --
+      // see src/signals.js for the measurements behind that choice.
+      if (req.method === 'GET' && path === '/api/triage') {
+        const analysis = analyze(current.scan);
+        return sendJson(res, 200, {
+          candidates: ranked(analysis, 200),
+          total: analysis.size,
+        });
+      }
 
       if (req.method === 'GET' && path === '/api/tree') {
         return sendJson(res, 200, {

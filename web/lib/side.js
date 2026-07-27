@@ -7,7 +7,7 @@
 import { store, pathOf, changesOf } from './store.js';
 import { api } from './api.js';
 import { el } from './dom.js';
-import { editNote, deleteNote, addNote, runApply, fmtBytes } from '../app.js';
+import { editNote, deleteNote, addNote, runApply, fmtBytes, toggleEvict } from '../app.js';
 import { revealNode } from './tree.js';
 
 const MODE = Object.freeze({
@@ -15,6 +15,7 @@ const MODE = Object.freeze({
   PREVIEW: 'preview',
   REVIEW: 'review',
   NOTES: 'notes',
+  TRIAGE: 'triage',
   HELP: 'help',
 });
 
@@ -48,6 +49,7 @@ export function renderSide() {
   if (mode === MODE.PREVIEW) renderPreview(body);
   else if (mode === MODE.REVIEW) renderReview(body);
   else if (mode === MODE.NOTES) renderNotes(body);
+  else if (mode === MODE.TRIAGE) renderTriage(body);
   else if (mode === MODE.HELP) renderHelp(body);
 }
 
@@ -319,6 +321,101 @@ function renderNotes(body) {
   body.appendChild(sec);
 }
 
+/* ---------------------------------------------------------------- triage */
+let triageData = null;
+
+export async function showTriage() {
+  open(MODE.TRIAGE, 'cleanup candidates');
+  triageData = { loading: true };
+  renderSide();
+  try {
+    triageData = await api.get('/api/triage');
+  } catch (e) {
+    triageData = { error: e.message };
+  }
+  if (mode === MODE.TRIAGE) renderSide();
+}
+
+function renderTriage(body) {
+  const d = triageData || {};
+  if (d.loading) {
+    body.appendChild(el('p', 'note-empty', 'Looking for likely-disposable entries\u2026'));
+    return;
+  }
+  if (d.error) {
+    body.appendChild(el('p', 'problem', d.error));
+    return;
+  }
+  const list = d.candidates || [];
+  if (!list.length) {
+    body.appendChild(el('p', 'note-empty', 'Nothing here looks obviously disposable.'));
+    return;
+  }
+
+  // State the ranking basis up front. Someone looking at a cleanup list will
+  // reasonably assume it is sorted by age, and acting on that assumption is how
+  // you delete the wrong things.
+  const intro = el('div', 'side-section');
+  intro.appendChild(el('h3', null, `${d.total} candidate(s)`));
+  intro.appendChild(
+    el(
+      'p',
+      'note-empty',
+      'Ranked by name and structure -- an archive still sitting beside its unpacked ' +
+        'copy, a name that says "backup" or "dryrun". Age is shown for context but is ' +
+        'deliberately not ranked: on real directories the obvious junk is often days ' +
+        'old and the deliberate keepers are often years old, so mtime sorts badly.'
+    )
+  );
+  body.appendChild(intro);
+
+  let totalBytes = 0;
+  for (const c of list) {
+    const n = store.nodes.get(c.id);
+    totalBytes += c.bytes || 0;
+    const card = el('div', 'note-card');
+
+    const head = el('div', 'note-target');
+    head.textContent = c.id;
+    card.appendChild(head);
+
+    const facts = [];
+    if (c.bytes) facts.push(fmtBytes(c.bytes));
+    if (n && n.mtime) facts.push(`${Math.round((Date.now() - n.mtime) / 86400000)}d old`);
+    if (facts.length) card.appendChild(el('div', 'note-empty', facts.join('  \u00b7  ')));
+
+    for (const sig of c.signals) {
+      const line = el('div', 'note-body');
+      line.appendChild(el('kbd', null, sig.label));
+      line.appendChild(document.createTextNode('  ' + sig.why));
+      card.appendChild(line);
+    }
+
+    const acts = el('div', 'note-acts');
+    if (n) {
+      const mark = el('button', 'btn' + (n.evicted ? ' on' : ' danger'), n.evicted ? 'marked' : 'mark for trash');
+      mark.addEventListener('click', () => {
+        toggleEvict(n);
+        renderSide();
+      });
+      const reveal = el('button', 'btn', 'reveal');
+      reveal.addEventListener('click', () => revealNode(c.id));
+      acts.append(mark, reveal);
+    } else {
+      acts.appendChild(el('span', 'note-empty', 'no longer in the tree -- rescan'));
+    }
+    card.appendChild(acts);
+    body.appendChild(card);
+  }
+
+  const foot = el('div', 'side-section');
+  foot.appendChild(el('p', 'note-empty', `${fmtBytes(totalBytes)} across those ${list.length}.`));
+  foot.appendChild(
+    el('p', 'note-empty', 'Marking only stages a decision. Nothing moves until you apply, and "trash" means .reorg/trash/, not deletion.')
+  );
+  body.appendChild(foot);
+}
+
 /* ---------------------------------------------------------------- help */
 export function showHelp() {
   open(MODE.HELP, 'shortcuts');
@@ -377,6 +474,21 @@ function renderHelp(body) {
     )
   );
   body.appendChild(about);
+
+  const triage = el('div', 'side-section');
+  triage.appendChild(el('h3', null, 'triage'));
+  triage.appendChild(
+    el(
+      'p',
+      'note-empty',
+      'The triage panel ranks likely-disposable entries by NAME and structure, not by age. ' +
+        'That is deliberate: measured on real scratch directories, mtime barely correlates ' +
+        'with disposability -- the obvious junk is often days old, and things kept on purpose ' +
+        'are often years old. A name that says "backup" or "dryrun", or an archive still ' +
+        'sitting beside its unpacked copy, predicts far better. Age is displayed for context.'
+    )
+  );
+  body.appendChild(triage);
 
   const filter = el('div', 'side-section');
   filter.appendChild(el('h3', null, 'filtering'));

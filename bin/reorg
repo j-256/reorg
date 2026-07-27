@@ -10,6 +10,7 @@ import { loadPlan, listUndoScripts, stateDir, planPath, clearAppliedPlan } from 
 import { resolve as resolvePlan, describeOp } from '../src/plan.js';
 import { apply } from '../src/apply.js';
 import { summarize, emitPrompts, ingestSummaries, DEFAULT_MODEL } from '../src/summarize.js';
+import { analyze, ranked } from '../src/signals.js';
 import { formatBytes } from '../src/scan.js';
 
 const HELP = `reorg -- plan a directory reorganization, then apply it safely.
@@ -21,6 +22,7 @@ USAGE
   reorg apply [dir] --yes        actually apply, writing an undo script first
   reorg undo [dir]               run the most recent undo script
   reorg summarize [dir]          one-line AI summary per file (see SUMMARIES)
+  reorg triage [dir]             rank likely-disposable entries (see TRIAGE)
   reorg status [dir]             what is planned, what is applied, what can be undone
 
 OPTIONS
@@ -38,6 +40,7 @@ OPTIONS
   --ingest          with 'summarize': merge an agent-filled summaries.json
   --model ID        with 'summarize': model to call (default ${DEFAULT_MODEL})
   --force           with 'summarize': re-summarize files that already have one
+  --limit N         with 'triage': show at most N candidates (default 30)
   -h, --help        this text
 
 SUMMARIES
@@ -46,6 +49,15 @@ SUMMARIES
                                      Point any coding agent at it -- no API key,
                                      no cost. Then: reorg summarize --ingest
     ANTHROPIC_API_KEY=... reorg summarize   calls the API directly and fills them in.
+
+TRIAGE
+  'reorg triage' ranks entries that look disposable and says why, so you can
+  decide rather than scroll. It reads NAMES and structure, not age: measured
+  against real scratch directories, "backup"/"dryrun"/"tmp" in a name and an
+  archive still sitting beside its unpacked copy predict junk well, while mtime
+  predicts almost nothing -- the obvious junk is often days old and the
+  deliberate keepers are often years old. Age is shown for context, never scored.
+  Triage only ever prints; marking anything for trash stays your decision.
 
 SAFETY
   Nothing is deleted. "Trash" moves into .reorg/trash/<run>/, recoverable by the
@@ -73,6 +85,7 @@ function parseArgs(argv) {
     else if (a === '--collapse-over') opts.collapseOver = parseInt(argv[++i], 10);
     else if (a === '--depth') opts.maxDepth = parseInt(argv[++i], 10);
     else if (a === '--model') opts.model = argv[++i];
+    else if (a === '--limit') opts.limit = parseInt(argv[++i], 10);
     else if (a.startsWith('-')) {
       console.error(`reorg: unknown option ${a}\nTry: reorg --help`);
       process.exit(2);
@@ -81,7 +94,7 @@ function parseArgs(argv) {
   return opts;
 }
 
-const KNOWN = new Set(['plan', 'apply', 'undo', 'summarize', 'status', 'serve']);
+const KNOWN = new Set(['plan', 'apply', 'undo', 'summarize', 'triage', 'status', 'serve']);
 
 function resolveRoot(candidate) {
   const root = resolvePath(candidate || '.');
@@ -276,6 +289,41 @@ async function main() {
       console.log(`Tokens: ${res.usage.input_tokens} in, ${res.usage.output_tokens} out`);
     }
     if (res.skipped.length) console.log(`Skipped ${res.skipped.length} (binary, empty, or missing).`);
+    return;
+  }
+
+  // ---- triage ------------------------------------------------------------
+  if (cmd === 'triage') {
+    const s = scan(root, scanOpts(opts));
+    const analysis = analyze(s, { bulkOver: opts.collapseOver });
+    const byId = new Map(s.nodes.map((n) => [n.id, n]));
+    const list = ranked(analysis, opts.limit || 30);
+
+    if (!list.length) {
+      console.log('Nothing here looks obviously disposable.');
+      return;
+    }
+    console.log(`${analysis.size} candidate(s) in ${root}, strongest first.`);
+    console.log('Ranked by name and structure. Age is shown for context only.\n');
+
+    // Explain each reason once, in a legend, rather than repeating the same
+    // sentence under every row -- at 30 candidates that is most of the output.
+    const seen = new Map();
+    for (const c of list) for (const sig of c.signals) if (!seen.has(sig.id)) seen.set(sig.id, sig.why);
+
+    for (const c of list) {
+      const n = byId.get(c.id);
+      const age = n && n.mtime ? `${Math.round((Date.now() - n.mtime) / 86400000)}d` : '';
+      console.log(`  ${formatBytes(c.bytes).padStart(8)}  ${age.padStart(5)}  ${c.id}`);
+      console.log(`            ${c.signals.map((sig) => sig.label).join('  |  ')}`);
+    }
+
+    console.log('\nWhy those were flagged:');
+    for (const why of new Set(seen.values())) console.log(`  - ${why}`);
+    const total = list.reduce((a, c) => a + (c.bytes || 0), 0);
+    console.log(`\n${formatBytes(total)} across those ${list.length}.`);
+    console.log('Nothing was changed. Open the planner to act on any of it:');
+    console.log(`  reorg ${root === process.cwd() ? '' : root}`.trimEnd());
     return;
   }
 

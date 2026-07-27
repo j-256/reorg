@@ -12,7 +12,15 @@
 import { api, setToken } from './lib/api.js';
 import { store, ROOT_ID, childrenOf, isDir, changesOf, pathOf, isDescendant } from './lib/store.js';
 import { renderTree, revealNode } from './lib/tree.js';
-import { renderSide, showPreview, showReview, showNotes, showHelp, closeSide } from './lib/side.js';
+import {
+  renderSide,
+  showPreview,
+  showReview,
+  showNotes,
+  showTriage,
+  showHelp,
+  closeSide,
+} from './lib/side.js';
 import { toast, el } from './lib/dom.js';
 
 const $ = (s) => document.querySelector(s);
@@ -162,6 +170,7 @@ function buildToolbar() {
   );
   sep();
 
+  mk('triage', 'entries that look disposable, ranked by name and structure (not age)', () => showTriage());
   mk('notes', 'notes you have left on entries', () => showNotes());
   mk('review', 'the exact operations this plan resolves to', () => showReview());
   sep();

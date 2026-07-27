@@ -40,6 +40,7 @@ Requires Node 20.6+. There are no runtime dependencies -- `package.json` has an 
 | `reorg undo [dir]` | run the most recent undo script |
 | `reorg status [dir]` | what is planned, applied, and undoable |
 | `reorg summarize [dir]` | one-line AI description per file (see below) |
+| `reorg triage [dir]` | rank likely-disposable entries and say why |
 
 In the planner:
 
@@ -87,6 +88,32 @@ The API path batches files (about a dozen per request), sends only the first few
 
 Summaries are stored in the plan and keyed by path, so they survive a rescan.
 
+## Triage: what looks disposable
+
+`reorg triage` ranks entries that look like junk and says why, so a directory that has got away from you starts with a shortlist instead of a scroll. The same list is in the planner behind the **triage** button, where each row has a mark-for-trash button.
+
+**It ranks names and structure, not age.** That is the opposite of the obvious design, and it is deliberate. Measured against a real scratch directory, mtime barely correlated with disposability:
+
+- The clearly-disposable entries -- a `-backup-20260425` directory, a `.zip` still sitting beside its unpacked copy, a downloaded `.dmg` -- had ages spanning 12 to 586 days. Age separated them from nothing, and seven of eight `-backup-`/`-dryrun-` directories were all *12 days old*, so an age sort would have called them active.
+- What age surfaced instead were keepers: an example image kept on purpose for two years, a reference screenshot, a script still in use.
+
+A name is frequently a direct statement of intent -- someone wrote "backup" or "dryrun" because that is what the thing was for. So the signals are:
+
+| Signal | Why |
+|---|---|
+| an archive beside its unpacked copy | pure duplication; one of the two is redundant |
+| a name ending in `backup`/`dryrun`/`tmp`/`presync`/... | the name states it was a safety copy |
+| installer (`.dmg`, `.pkg`, `.msi`) | re-downloadable, dead weight once installed |
+| scratch extension (`.log`, `.bak`, `.crdownload`) | a byproduct, not something authored |
+| a bare `.git` clone | a mirror kept as a one-off safety copy |
+| bulky | worth a decision purely for what it costs to keep |
+
+Position matters, because the same word can name a subject rather than a status. `work-backup-20260317` is a backup; `backup-strategy-notes.md` is a document about backups, and `all-mail-including-spam-and-trash.mbox` is three gigabytes of actual mail. Only trailing markers count -- both of those were real false positives, and flagging 3 GB of someone's mail as trash is how a suggestion list loses its reader.
+
+Emptiness is deliberately not a signal: empty directories are often intentional (mount points, placeholders) and cost nothing to keep.
+
+Age is still shown on every row, for context. It is just never what sorts them.
+
 ## How the plan becomes operations
 
 Worth knowing, because it explains why the output looks the way it does.
@@ -109,6 +136,7 @@ src/scan.js        walk a directory, tag git status, summarize collapsed dirs
 src/plan.js        pure resolver: plan -> ordered operations (no fs, no exec)
 src/apply.js       execute, with drift checks, git mv, trash, undo script
 src/summarize.js   Messages API batching + the no-key agent prompt pack
+src/signals.js     cleanup signals: what looks disposable, and why (name, not age)
 src/server.js      stdlib http server, token-gated JSON API
 src/state.js       .reorg/plan.json load, save, self-ignore
 web/               the planner: tree, drag and drop, preview, review

@@ -120,6 +120,17 @@ function ignoredSet(root, prefix, ids) {
   return set;
 }
 
+// A directory's own mtime -- when its contents last changed shape, which is not
+// the same as when anything inside was edited. Shown for context only; nothing is
+// ranked on it (see src/signals.js for why age is a poor cleanup signal).
+function dirMtime(abs) {
+  try {
+    return statSync(abs).mtimeMs;
+  } catch {
+    return null;
+  }
+}
+
 function hasOwnGit(abs) {
   return existsSync(join(abs, '.git'));
 }
@@ -272,13 +283,14 @@ export function scan(root, opts = {}) {
             meta: [why, label, formatBytes(full.bytes)].filter(Boolean).join(', '),
             bytes: full.bytes,
             files: full.files,
+            mtime: dirMtime(childAbs),
             nestedRepo: nested,
             collapsedSubtree: true,
           });
           collapsedDirs.push({ id, files: full.files, bytes: full.bytes });
           continue;
         }
-        flat.push({ id, name: e.name, parentId, kind: 'dir' });
+        flat.push({ id, name: e.name, parentId, kind: 'dir', mtime: dirMtime(childAbs) });
         walk(childAbs, id, depth + 1);
       } else if (isLink) {
         let target = '';
