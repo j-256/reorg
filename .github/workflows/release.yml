@@ -1,0 +1,153 @@
+name: Release
+
+# Triggers:
+#   - push a v* tag      -> validate, test, publish, release
+#   - workflow_dispatch  -> the same pipeline, dry run by default
+#
+# Releases are cut with `npm version patch` on main, which tags and pushes; that
+# tag push is what lands here. ci.yml stays a pure test gate and knows nothing
+# about publishing.
+#
+# The filename is load-bearing: npm pins a trusted publisher to one exact
+# workflow filename, so renaming this file breaks the OIDC migration.
+
+on:
+  push:
+    tags: [v*]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Dry run (pack and verify, publish nothing)
+        type: boolean
+        default: true
+
+permissions:
+  contents: write # create the GitHub release
+  id-token: write # provenance attestation
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0 # the tag-on-main check needs history
+
+      # A tag pointing at a commit that never reached main would publish code
+      # nobody reviewed on main. Only meaningful for tag pushes: a manual dry
+      # run from a branch has no tag to check.
+      - name: Verify the tag is on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          if ! git branch -r --contains "$GITHUB_SHA" | grep -q 'origin/main'; then
+            echo "Error: tag $GITHUB_REF_NAME is not on the main branch"
+            exit 1
+          fi
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          # Writes the .npmrc that picks up NODE_AUTH_TOKEN below. Without it
+          # the token is ignored and the publish fails with ENEEDAUTH.
+          registry-url: https://registry.npmjs.org
+
+      - name: Verify the tag matches package.json version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          PKG_VERSION="v$(node -p 'require("./package.json").version')"
+          if [ "$PKG_VERSION" != "$GITHUB_REF_NAME" ]; then
+            echo "Error: tag $GITHUB_REF_NAME does not match package.json version $PKG_VERSION"
+            exit 1
+          fi
+
+      # A tag can point at a commit ci.yml never ran on, so re-run the gate
+      # rather than trusting a green tick elsewhere. One leg, not the matrix:
+      # this suite needs nothing installed.
+      - name: Run tests
+        run: npm test
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          npm pack --pack-destination artifacts
+          tgz="$(ls artifacts/*.tgz)"
+          {
+            printf '\n**Tarball contents**\n\n'
+            echo '```'
+            tar tzf "$tgz" | sort
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The check that actually protects a publish: a tarball missing a source
+      # file installs broken while every unit test passes. Mirrors ci.yml's
+      # package job -- duplicated on purpose, since Actions has no include for
+      # step bodies and workflow_call is what npm flags as breaking OIDC
+      # trusted-publisher validation.
+      - name: Verify the packed CLI runs from a clean install
+        run: |
+          set -euo pipefail
+          tgz="$(ls "$PWD"/artifacts/*.tgz)"
+          work="$(mktemp -d)"
+          cd "$work"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund "$tgz" >/dev/null 2>&1
+          # The package name and the installed command differ on purpose, so
+          # assert on the binary rather than assuming they match.
+          ./node_modules/.bin/reorg --help | head -1
+          mkdir -p sample/old-backup && echo hi > sample/keep.txt
+          ./node_modules/.bin/reorg triage sample
+          # Dry run must be the default: this must not move anything.
+          ./node_modules/.bin/reorg apply sample
+          test -f sample/keep.txt
+
+      # --access public is mandatory on a first publish, not decoration: npm
+      # treats the 404 from a not-yet-published package as "private" and refuses
+      # to generate provenance without it. Harmless on every later release.
+      #
+      # Note --dry-run skips the publish path entirely (npm gates libpub behind
+      # it), so a dry run proves packing and validation -- not credentials,
+      # provenance, or registry acceptance.
+      - name: Publish to npm
+        run: |
+          set -euo pipefail
+          set -- --provenance --access public
+          if [ "${DRY_RUN:-}" = "true" ]; then
+            set -- "$@" --dry-run
+          fi
+          echo "npm publish $*"
+          npm publish "$@"
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+
+      # Distinguishes "we uploaded a tarball" from "a user can install it",
+      # which the packed-install check above cannot speak to since it never
+      # touches the registry. Cannot gate anything -- the publish above is
+      # irreversible -- so it is an alarm, not a check. A freshly published
+      # version is not instantly resolvable, hence the retries.
+      - name: Smoke test the published package
+        if: ${{ !inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          version="$(node -p 'require("./package.json").version')"
+          work="$(mktemp -d)"
+          cd "$work"
+          npm init -y >/dev/null 2>&1
+          for attempt in 1 2 3 4 5; do
+            if npm install --no-audit --no-fund "reorg-cli@$version" >/dev/null 2>&1; then
+              ./node_modules/.bin/reorg --help | head -1
+              echo "Installed reorg-cli@$version from the registry on attempt $attempt"
+              exit 0
+            fi
+            echo "Not resolvable yet (attempt $attempt), waiting..."
+            sleep $((attempt * 10))
+          done
+          echo "Error: reorg-cli@$version did not become installable from the registry"
+          exit 1
+
+      - name: Create the GitHub release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+        run: gh release create "$GITHUB_REF_NAME" artifacts/*.tgz --title "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
