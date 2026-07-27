@@ -256,10 +256,17 @@ export function beginRename(n, nameEl) {
   sel.removeAllRanges();
   sel.addRange(range);
 
+  let done = false;
   const finish = (commit) => {
-    nameEl.removeAttribute('contenteditable');
+    // Guard against re-entry. Dropping contenteditable below blurs the element,
+    // which fires onBlur -> finish(true) -- so an Escape would commit the very
+    // edit it was cancelling. Detaching the listeners first is not enough,
+    // because blur can be dispatched synchronously from removeAttribute.
+    if (done) return;
+    done = true;
     nameEl.removeEventListener('keydown', onKey);
     nameEl.removeEventListener('blur', onBlur);
+    nameEl.removeAttribute('contenteditable');
     const res = commit ? edit.renameNode(n.id, nameEl.textContent) : { ok: true, changed: false };
     if (res.changed) {
       markDirty();
