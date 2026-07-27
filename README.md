@@ -27,7 +27,7 @@ git clone https://github.com/j-256/reorg
 cd reorg && npm link      # then: reorg <dir>
 ```
 
-Requires Node 20.6+. There are no runtime dependencies -- `package.json` has an empty `dependencies` block and that is deliberate.
+Requires Node 22 or newer -- the oldest release still receiving security updates. There are no runtime dependencies: `package.json` has an empty `dependencies` block and that is deliberate.
 
 ## Using it
 

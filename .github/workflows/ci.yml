@@ -1,0 +1,126 @@
+name: CI
+
+# Triggers:
+#   - push to main      -> test
+#   - pull_request      -> test
+#   - workflow_dispatch -> test
+#
+# There is nothing to lint or compile here: the repo has no dependencies and no
+# build step, so `npm test` is the whole gate. `npm ci` is deliberately absent --
+# with no lockfile dependencies to install it would only fail on an empty tree.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Why are you running this?'
+        required: false
+        type: string
+
+permissions: read-all
+
+jobs:
+  test:
+    # We support back to 22 because it is the oldest release still receiving
+    # security updates, and engines.node says so to match. Testing it is what
+    # makes that promise real rather than aspirational -- if we ever want to
+    # drop it, raise engines.node and delete it here, in that order.
+    # 24 is Active LTS, what most people run. 26 is Current, and catches what
+    # the newest runtime deprecates before it reaches an LTS line.
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24, 26]
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    name: test (node ${{ matrix.node }}, ${{ matrix.os }})
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Note manual trigger reason
+        if: github.event_name == 'workflow_dispatch' && inputs.reason != ''
+        env:
+          REASON: ${{ inputs.reason }}
+        run: echo "**Triggered manually:** $REASON" >> "$GITHUB_STEP_SUMMARY"
+
+      # The suite shells out to git (git mv, tracked-file detection) and runs the
+      # generated undo scripts with bash, so it needs both configured rather than
+      # merely present -- git refuses to commit without an identity.
+      - name: Configure git identity for the sandbox repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          git config --global init.defaultBranch main
+
+      # The test script pins --test-reporter=spec rather than relying on the
+      # default, which differs by Node version: 22 emits TAP ("# pass 122") and
+      # 24+ emit spec ("i pass 122"). Parsing whichever arrived would make this
+      # summary silently empty on one leg of the matrix.
+      - name: Run tests
+        run: |
+          printf '\n**node %s on %s**\n\n' '${{ matrix.node }}' '${{ matrix.os }}' >> "$GITHUB_STEP_SUMMARY"
+          npm test 2>&1 | tee test.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -eq 0 ]; then
+            echo "✅ $(grep -E '^. (tests|pass) ' test.log | tr '\n' ' ')" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo '```'
+              cat test.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+
+  # A tarball that omits a source file would install broken while every test
+  # passes, so verify what `npm publish` would actually ship.
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Pack and inspect
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          npm pack --pack-destination artifacts
+          tgz="$(ls artifacts/*.tgz)"
+          {
+            printf '\n**Tarball contents**\n\n'
+            echo '```'
+            tar tzf "$tgz" | sort
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Verify the packed CLI runs from a clean install
+        run: |
+          set -euo pipefail
+          tgz="$(ls "$PWD"/artifacts/*.tgz)"
+          work="$(mktemp -d)"
+          cd "$work"
+          npm init -y >/dev/null 2>&1
+          npm install --no-audit --no-fund "$tgz" >/dev/null 2>&1
+          # The package name and the installed command differ on purpose, so
+          # assert on the binary rather than assuming they match.
+          ./node_modules/.bin/reorg --help | head -1
+          mkdir -p sample/old-backup && echo hi > sample/keep.txt
+          ./node_modules/.bin/reorg triage sample
+          # Dry run must be the default: this must not move anything.
+          ./node_modules/.bin/reorg apply sample
+          test -f sample/keep.txt
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tarball
+          path: artifacts/*.tgz
+          if-no-files-found: error
+          retention-days: 14

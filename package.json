@@ -10,10 +10,10 @@
   "bugs": "https://github.com/j-256/reorg/issues",
   "type": "module",
   "bin": { "reorg": "bin/reorg" },
-  "engines": { "node": ">=20.6" },
+  "engines": { "node": ">=22" },
   "files": ["bin", "src", "web", "README.md", "LICENSE"],
   "scripts": {
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test --test-reporter=spec \"test/*.test.js\""
   },
   "dependencies": {},
   "devDependencies": {}
