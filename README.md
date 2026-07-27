@@ -8,7 +8,7 @@ npx reorg-cli ~/Downloads
 
 That scans the directory, opens a planner in your browser, and prints a URL. Drag folders around, rename things, mark junk for trash. Nothing touches disk until you say so.
 
-No dependencies, no build step, no config file. One Node script and a page.
+No runtime dependencies, no build step, no config file. One Node script and a page.
 
 ## Why
 
@@ -28,6 +28,22 @@ cd reorg && npm link      # then: reorg <dir>
 ```
 
 Requires Node 22 or newer -- the oldest release still receiving security updates. There are no runtime dependencies: `package.json` has an empty `dependencies` block and that is deliberate.
+
+## Tests
+
+```bash
+npm test        # no install needed -- runs on a bare checkout
+npm run test:ui # browser tests; needs `npm ci` and a Chromium
+npm run test:all
+```
+
+`npm test` needs nothing installed, deliberately: it covers the scanner, the plan resolver, the apply engine and its undo scripts, the triage signals, the server's access control, and the browser-side plan model, all under `node --test` with nothing fetched.
+
+`npm run test:ui` drives the real page in a real Chromium, which is the only way to cover what a fake DOM cannot: drop-zone geometry is computed from the pointer's position against a row's box, and jsdom reports every box as zero-sized. It also runs a WCAG AA contrast sweep over both themes. Playwright is the one dependency in the repo and it is confined to `devDependencies`:
+
+```bash
+npm ci && npx playwright install chromium
+```
 
 ## Using it
 
