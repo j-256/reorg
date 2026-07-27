@@ -4,57 +4,25 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import {
-  mkdtempSync,
-  mkdirSync,
-  writeFileSync,
-  existsSync,
-  readFileSync,
-  rmSync,
-  symlinkSync,
-  lstatSync,
-} from 'node:fs';
+import { writeFileSync, existsSync, readFileSync, symlinkSync, lstatSync, rmSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { scan } from '../src/scan.js';
 import { resolve, OP } from '../src/plan.js';
 import { apply, checkDrift, buildUndoScript } from '../src/apply.js';
 import { emptyPlan, loadPlan, savePlan, planPath, clearAppliedPlan } from '../src/state.js';
+import { sandbox, cleanup } from './helpers.js';
 
-function sandbox(layout, opts = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'reorg-test-'));
-  for (const [p, content] of Object.entries(layout)) {
-    const abs = join(root, p);
-    if (p.endsWith('/')) {
-      mkdirSync(abs, { recursive: true });
-    } else {
-      mkdirSync(join(abs, '..'), { recursive: true });
-      writeFileSync(abs, content ?? p);
-    }
-  }
-  if (opts.git) {
-    execFileSync('git', ['-C', root, 'init', '-q'], { stdio: 'ignore' });
-    execFileSync('git', ['-C', root, 'config', 'user.email', 'test@example.com'], { stdio: 'ignore' });
-    execFileSync('git', ['-C', root, 'config', 'user.name', 'test'], { stdio: 'ignore' });
-    if (opts.commit !== false) {
-      execFileSync('git', ['-C', root, 'add', '-A'], { stdio: 'ignore' });
-      execFileSync('git', ['-C', root, 'commit', '-qm', 'init'], { stdio: 'ignore' });
-    }
-  }
-  return root;
-}
-
-const cleanup = [];
+const boxes = [];
 const box = (...a) => {
   const r = sandbox(...a);
-  cleanup.push(r);
+  boxes.push(r);
   return r;
 };
 test.after(() => {
-  for (const r of cleanup) {
+  for (const r of boxes) {
     try {
-      rmSync(r, { recursive: true, force: true });
+      cleanup(r);
     } catch {
       /* best effort */
     }

@@ -6,22 +6,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { summarize, emitPrompts, ingestSummaries, DEFAULT_MODEL } from '../src/summarize.js';
 import { loadPlan } from '../src/state.js';
 import { looksTextual } from '../src/text.js';
-
-function sandbox(files) {
-  const root = mkdtempSync(join(tmpdir(), 'reorg-sum-'));
-  for (const [p, content] of Object.entries(files)) {
-    const abs = join(root, p);
-    mkdirSync(join(abs, '..'), { recursive: true });
-    writeFileSync(abs, content);
-  }
-  return root;
-}
+import { sandbox, cleanup } from './helpers.js';
 
 const boxes = [];
 const box = (f) => {
@@ -32,7 +22,7 @@ const box = (f) => {
 test.after(() => {
   for (const r of boxes) {
     try {
-      rmSync(r, { recursive: true, force: true });
+      cleanup(r);
     } catch {
       /* best effort */
     }
@@ -215,7 +205,7 @@ test('emit-prompts writes a fillable stub and ingest merges it back', async () =
   const out = await emitPrompts({ root, paths: ['a.txt', 'sub/b.txt'] });
   assert.equal(out.count, 2);
 
-  const stub = JSON.parse(await import('node:fs').then((fs) => fs.readFileSync(out.outPath, 'utf8')));
+  const stub = JSON.parse(readFileSync(out.outPath, 'utf8'));
   assert.deepEqual(stub, { 'a.txt': '', 'sub/b.txt': '' }, 'keys are node ids, values blank');
 
   writeFileSync(out.outPath, JSON.stringify({ 'a.txt': 'a greeting', 'sub/b.txt': '' }));
