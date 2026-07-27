@@ -21,7 +21,7 @@ const OUT = process.argv[2] || join(dirname(fileURLToPath(import.meta.url)), '..
 // Height is tuned so the tree content fills the frame: the demo tree runs to about
 // 560px, and a taller viewport just adds dead space below the last row that a
 // reader has to scroll past in the README.
-const VIEWPORT = { width: 1280, height: 760 };
+const VIEWPORT = { width: 1280, height: 800 };
 
 /* A directory that looks like a real one people actually have. The point of the
    screenshots is to show the tool earning its keep, and it cannot do that against
@@ -70,6 +70,14 @@ const TREE = {
   'Docker.dmg': [620_000_000, 73],
   'old-notes-presync.txt': [1_100, 9],
   'scratch.log': [240_000, 3],
+
+  // Deliberate near-misses, present so the panel can be seen DECLINING to flag
+  // them. Both contain a marker word in a non-trailing position -- one is a
+  // document about backups, the other is actual mail -- and both were real false
+  // positives before the position rule went in. A candidate list cannot show
+  // restraint by itself; it needs the things it passed over to be on screen.
+  'backup-strategy-notes.md': [4_800, 233],
+  'all-mail-including-spam-and-trash.mbox': [3_100_000_000, 512],
 };
 
 const DAY_MS = 24 * 60 * 60 * 1000;

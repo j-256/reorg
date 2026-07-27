@@ -127,7 +127,7 @@ Summaries are stored in the plan and keyed by path, so they survive a rescan.
 | a bare `.git` clone | a mirror kept as a one-off safety copy |
 | bulky | worth a decision purely for what it costs to keep |
 
-Position matters, because the same word can name a subject rather than a status. `work-backup-20260317` is a backup; `backup-strategy-notes.md` is a document about backups, and `all-mail-including-spam-and-trash.mbox` is three gigabytes of actual mail. Only trailing markers count – both of those were real false positives, and flagging 3 GB of someone's mail as trash is how a suggestion list loses its reader.
+Position matters, because the same word can name a subject rather than a status. Only trailing markers count, and the screenshot above shows both sides of that: `project-backup-20260415` is flagged, while `backup-strategy-notes.md` and `all-mail-including-spam-and-trash.mbox` sit in the same tree untouched – one is a document *about* backups, the other is 2.9 GB of actual mail. Both of those were real false positives before the position rule went in, and flagging 3 GB of someone's mail as trash is how a suggestion list loses its reader.
 
 Emptiness is deliberately not a signal: empty directories are often intentional (mount points, placeholders) and cost nothing to keep.
 
