@@ -197,11 +197,15 @@ gh workflow run release.yml
 
 A dry run proves that the package builds, packs, installs, and passes its tests. It does not prove the publish itself: npm skips the entire publish path under `--dry-run`, so credentials, provenance, and registry acceptance are only exercised by a real release.
 
-If CI fails *before* the registry accepts the upload – a bad tag, a failed test, a provenance error – the version number is untouched and you can move the tag:
+Unchecking `dry_run` on a manual dispatch is a real publish, and not the way to cut a release: dispatching has no tag, so both tag checks are skipped and no GitHub release is created – npm gets the version, the repo does not. Release by pushing a tag.
+
+If CI fails *before* the registry accepts the upload – a bad tag, a failed test, a provenance error – the version number is untouched and you can move the tag onto the fix:
 
 ```bash
 npm run retag
 ```
+
+That moves the tag to whatever `main` currently points at, so push the fix first. `retag` runs the same guard as `npm version` and refuses from a feature branch or an unpushed `main`, since either would tag a commit the release then could not verify.
 
 Once a version is on the registry it is spent; npm does not allow republishing it. A failure after that point means the package is live and the fix is the next patch, not a retag. The GitHub release is therefore cut whenever the publish succeeded, even if the registry smoke test then fails – a slow-propagating registry should not also cost you the release.
 

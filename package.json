@@ -18,8 +18,8 @@
     "test:all": "npm test && npm run test:ui",
     "screenshots": "node scripts/screenshots.mjs",
     "preversion": "bash scripts/preversion.sh && npm test",
-    "postversion": "git push origin main v$npm_package_version",
-    "retag": "git tag -f v$npm_package_version && git push origin v$npm_package_version --force"
+    "postversion": "git push --atomic origin main v$npm_package_version",
+    "retag": "bash scripts/preversion.sh && git tag -f v$npm_package_version && git push origin v$npm_package_version --force"
   },
   "dependencies": {},
   "devDependencies": { "playwright": "^1.61.1" }

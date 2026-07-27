@@ -66,6 +66,17 @@ jobs:
             exit 1
           fi
 
+      # Same three lines ci.yml sets before both of its test jobs, for the same
+      # reason: the suite shells out to git and needs an identity configured
+      # rather than merely present. The tests happen to self-configure today, so
+      # this is insurance against the first one that does not -- which would
+      # otherwise fail here, mid-release, while ci.yml stayed green.
+      - name: Configure git identity for the sandbox repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          git config --global init.defaultBranch main
+
       # A tag can point at a commit ci.yml never ran on, so re-run the gate
       # rather than trusting a green tick elsewhere. One leg, not the matrix:
       # this suite needs nothing installed.
@@ -141,25 +152,36 @@ jobs:
           work="$(mktemp -d)"
           cd "$work"
           npm init -y >/dev/null 2>&1
-          for attempt in 1 2 3 4 5; do
-            if npm install --no-audit --no-fund "reorg-cli@$version" >/dev/null 2>&1; then
+          attempts=5
+          for attempt in $(seq "$attempts"); do
+            # Keep npm's output: a 404 means propagation lag and retrying is
+            # right, while E401/EPERM/a corrupt tarball mean it never will
+            # resolve. Silencing this leaves both looking identical in the log,
+            # and telling a human what happened is this step's only job.
+            if npm install --no-audit --no-fund "reorg-cli@$version" > install.log 2>&1; then
               ./node_modules/.bin/reorg --help | head -1
               echo "Installed reorg-cli@$version from the registry on attempt $attempt"
               exit 0
             fi
-            echo "Not resolvable yet (attempt $attempt), waiting..."
+            echo "Not resolvable yet (attempt $attempt):"
+            tail -5 install.log
+            # No sleep after the last attempt -- it would burn 50s before failing
+            [ "$attempt" -eq "$attempts" ] && break
             sleep $((attempt * 10))
           done
           echo "Error: reorg-cli@$version did not become installable from the registry"
+          echo "The package IS published -- this step cannot and does not undo that."
           exit 1
 
-      # `always()` because the publish above is irreversible: once a version is
-      # on the registry, a flaky smoke test must not cost us the release too. A
-      # failing step otherwise skips everything after it regardless of its own
-      # condition, which would leave a live package with no release. Gated on
-      # the publish step specifically so a failed publish still skips this.
+      # Runs even if the smoke test failed, because the publish above is
+      # irreversible: once a version is on the registry, a flaky smoke test must
+      # not cost us the release too. A failing step otherwise skips everything
+      # after it regardless of its own condition, which would leave a live
+      # package with no release. Gated on the publish step specifically, so a
+      # failed publish still skips this. `!cancelled()` rather than `always()`
+      # -- the docs recommend it, and it still honors a cancelled run.
       - name: Create the GitHub release
-        if: ${{ always() && steps.publish.conclusion == 'success' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+        if: ${{ !cancelled() && steps.publish.conclusion == 'success' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
         run: gh release create "$GITHUB_REF_NAME" artifacts/*.tgz --title "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
