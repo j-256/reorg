@@ -1,0 +1,420 @@
+// Browser tests for the planner.
+//
+// Separate from the *.test.js suites and run by `npm run test:ui`, because these
+// need a Chromium and those deliberately need nothing. What lives here is only what
+// a fake DOM cannot answer:
+//
+//   - drop-zone geometry, which is computed from clientY against the row's box
+//   - whether events actually reach their handlers
+//   - whether the page the server really serves boots and renders
+//   - contrast, which requires the browser's own compositing to measure
+//
+// Anything assertable without layout belongs in store.test.js instead.
+
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { planner, dragRow, selectRow, closeBrowser } from './ui-harness.js';
+
+after(closeBrowser);
+
+const TREE = {
+  'keep.txt': 'keep me',
+  'notes.md': 'notes',
+  'docs/note.md': '# note',
+  'docs/deep/inner.txt': 'inner',
+  'old-backup/junk.log': 'junk',
+};
+
+/* ---------------------------------------------------------------- boot */
+
+test('the served page boots and renders the tree without errors', async () => {
+  const p = await planner(TREE);
+  try {
+    assert.equal(await p.page.locator('.row').count(), 7, 'every scanned entry gets a row');
+    assert.match(await p.page.locator('#rootLabel').textContent(), /reorg-test-/);
+    assert.match(await p.page.locator('#treeHint').textContent(), /8 entries/);
+    assert.deepEqual(p.errors, []);
+  } finally {
+    await p.close();
+  }
+});
+
+test('nothing is marked as changed on a fresh scan', async () => {
+  const p = await planner(TREE);
+  try {
+    assert.equal(await p.page.locator('.row.changed, .row .badge').count(), 0);
+    const { ops } = await p.resolved();
+    assert.deepEqual(ops, []);
+  } finally {
+    await p.close();
+  }
+});
+
+/* ---------------------------------------------------------------- drag geometry */
+// The reason this file exists. dropZone() splits a row into thirds: the middle
+// third of a directory means "into", the outer thirds mean "become a sibling".
+// jsdom reports every box as zero-sized, so none of this is reachable there.
+
+test('dropping on the middle of a folder moves into it', async () => {
+  const p = await planner(TREE);
+  try {
+    await dragRow(p.page, 'keep.txt', 'docs', 'into');
+    const n = await p.node('keep.txt');
+    assert.equal(n.parentId, 'docs');
+
+    const { script, problems } = await p.resolved();
+    assert.deepEqual(problems, []);
+    assert.deepEqual(script, ['mv     keep.txt  ->  docs/keep.txt']);
+    assert.deepEqual(p.errors, []);
+  } finally {
+    await p.close();
+  }
+});
+
+test('dropping on the top edge makes it a sibling, not a child', async () => {
+  // The distinction the thirds exist for: same target row, different intent, and
+  // getting it wrong silently files things one level deeper than the user meant.
+  const p = await planner(TREE);
+  try {
+    await dragRow(p.page, 'keep.txt', 'docs', 'before');
+    const n = await p.node('keep.txt');
+    assert.equal(n.parentId, '.', 'a sibling of docs stays at the root');
+    const { ops } = await p.resolved();
+    assert.deepEqual(ops, [], 'already a sibling, so this is a no-op rather than a move');
+  } finally {
+    await p.close();
+  }
+});
+
+test('dropping on the bottom edge is also a sibling', async () => {
+  const p = await planner(TREE);
+  try {
+    await dragRow(p.page, 'notes.md', 'docs', 'after');
+    assert.equal((await p.node('notes.md')).parentId, '.');
+  } finally {
+    await p.close();
+  }
+});
+
+test('a file row has no "into" zone, so a drop on it becomes a sibling', async () => {
+  // dropZone() only returns 'into' for a directory; the middle of a file row must
+  // fall through to before/after rather than nesting a file inside a file.
+  const p = await planner(TREE);
+  try {
+    await dragRow(p.page, 'keep.txt', 'notes.md', 'into');
+    const n = await p.node('keep.txt');
+    assert.equal(n.parentId, '.', 'never parented to a file');
+    assert.deepEqual(p.errors, []);
+  } finally {
+    await p.close();
+  }
+});
+
+test('a folder refuses to be dropped inside its own descendant', async () => {
+  const p = await planner(TREE);
+  try {
+    // docs is expanded at boot (only depth >= 1 starts collapsed), so docs/deep is
+    // already on screen and draggable onto.
+    await dragRow(p.page, 'docs', 'docs/deep', 'into');
+
+    assert.equal((await p.node('docs')).parentId, '.', 'the move was refused');
+    assert.match(await p.page.locator('#toast').textContent(), /inside itself/i);
+    const { ops } = await p.resolved();
+    assert.deepEqual(ops, []);
+  } finally {
+    await p.close();
+  }
+});
+
+test('a drag into a collapsed folder expands it, so the result is visible', async () => {
+  const p = await planner(TREE);
+  try {
+    // docs/deep starts collapsed, being below the top level.
+    assert.equal((await p.node('docs/deep')).collapsed, true, 'precondition: target is collapsed');
+    await dragRow(p.page, 'keep.txt', 'docs/deep', 'into');
+
+    assert.equal((await p.node('keep.txt')).parentId, 'docs/deep', 'the move landed');
+    assert.equal((await p.node('docs/deep')).collapsed, false, 'the target opens to show what landed in it');
+    await p.page.waitForFunction(
+      () => [...document.querySelectorAll('.row')].some((r) => r.dataset.id === 'keep.txt' && r.closest('li')?.parentElement?.closest('li')),
+      null,
+      { timeout: 5000 }
+    );
+  } finally {
+    await p.close();
+  }
+});
+
+/* ---------------------------------------------------------------- keyboard */
+
+test('Delete marks the selection for trash and cascades to its contents', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'old-backup');
+    await p.page.keyboard.press('Delete');
+
+    assert.equal((await p.node('old-backup')).evicted, true);
+    assert.equal((await p.node('old-backup/junk.log')).evicted, true, 'contents come with it');
+
+    const { script, problems } = await p.resolved();
+    assert.deepEqual(problems, [], 'a cascaded trash resolves cleanly');
+    assert.deepEqual(script, ['trash  old-backup']);
+  } finally {
+    await p.close();
+  }
+});
+
+test('Delete twice restores, leaving no pending change', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'old-backup');
+    await p.page.keyboard.press('Delete');
+    await p.page.keyboard.press('Delete');
+    assert.equal((await p.node('old-backup')).evicted, false);
+    assert.equal((await p.node('old-backup/junk.log')).evicted, false);
+    const { ops } = await p.resolved();
+    assert.deepEqual(ops, []);
+  } finally {
+    await p.close();
+  }
+});
+
+test('F2 renames in place and Enter commits', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'keep.txt');
+    await p.page.keyboard.press('F2');
+    // F2 puts the .name span into contenteditable and selects its contents, so
+    // typing replaces the name without needing a select-all first.
+    await p.page.keyboard.type('renamed.txt');
+    await p.page.keyboard.press('Enter');
+
+    assert.equal((await p.node('keep.txt')).name, 'renamed.txt');
+    const { script } = await p.resolved();
+    assert.deepEqual(script, ['mv     keep.txt  ->  renamed.txt']);
+  } finally {
+    await p.close();
+  }
+});
+
+test('Escape abandons a rename and restores the original name', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'keep.txt');
+    await p.page.keyboard.press('F2');
+    await p.page.keyboard.type('abandoned');
+    await p.page.keyboard.press('Escape');
+
+    assert.equal((await p.node('keep.txt')).name, 'keep.txt');
+    assert.equal(await p.page.locator('.row[data-id="keep.txt"] .name').textContent(), 'keep.txt');
+    const { ops } = await p.resolved();
+    assert.deepEqual(ops, []);
+  } finally {
+    await p.close();
+  }
+});
+
+test('a rename to a path-breaking name is refused and warned about', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'keep.txt');
+    await p.page.keyboard.press('F2');
+    await p.page.keyboard.type('bad/name');
+    await p.page.keyboard.press('Enter');
+
+    assert.equal((await p.node('keep.txt')).name, 'keep.txt', 'the model is untouched');
+    assert.match(await p.page.locator('#toast').textContent(), /cannot contain/i);
+    assert.equal(
+      await p.page.locator('.row[data-id="keep.txt"] .name').textContent(),
+      'keep.txt',
+      'the field reverts too, rather than showing a name that was not accepted'
+    );
+  } finally {
+    await p.close();
+  }
+});
+
+test('n creates a folder inside the selected directory', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'docs');
+    await p.page.keyboard.press('n');
+    await p.page.waitForSelector('.row[data-id^="new:"]');
+
+    const created = await p.page.evaluate(async () => {
+      const { store } = await import('/lib/store.js');
+      const n = [...store.nodes.values()].find((x) => !x.orig);
+      return { id: n.id, parentId: n.cur.parentId, name: n.cur.name };
+    });
+    assert.equal(created.parentId, 'docs');
+    assert.equal(created.name, 'new-folder');
+  } finally {
+    await p.close();
+  }
+});
+
+test('arrow keys move the selection, and right/left expand and collapse', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'docs');
+    assert.equal((await p.node('docs')).collapsed, false, 'top-level folders start expanded');
+
+    await p.page.keyboard.press('ArrowLeft');
+    assert.equal((await p.node('docs')).collapsed, true, 'left collapses an open folder');
+
+    await p.page.keyboard.press('ArrowRight');
+    assert.equal((await p.node('docs')).collapsed, false, 'right reopens it');
+
+    await p.page.keyboard.press('ArrowDown');
+    const sel = await p.page.locator('.row.sel').getAttribute('data-id');
+    assert.notEqual(sel, 'docs', 'the selection moved off docs');
+  } finally {
+    await p.close();
+  }
+});
+
+test('? opens the shortcuts panel and Escape closes it', async () => {
+  const p = await planner(TREE);
+  try {
+    await p.page.keyboard.press('?');
+    await p.page.waitForSelector('#sidePane .pane-head');
+    assert.match(await p.page.locator('#sidePane').textContent(), /shortcuts/i);
+
+    await p.page.keyboard.press('Escape');
+    await p.page.waitForFunction(() => !document.querySelector('.stage')?.classList.contains('split'));
+  } finally {
+    await p.close();
+  }
+});
+
+/* ---------------------------------------------------------------- filter */
+
+test('the filter hides non-matching rows and / focuses it', async () => {
+  const p = await planner(TREE);
+  try {
+    await p.page.keyboard.press('/');
+    assert.equal(await p.page.evaluate(() => document.activeElement.id), 'filterBox');
+
+    await p.page.keyboard.type('junk');
+    // Non-matching rows are removed from the DOM, not hidden with a class, so the
+    // assertion is about what remains rather than about visibility.
+    await p.page.waitForFunction(() => document.querySelectorAll('.row').length < 7);
+    const ids = await p.page.$$eval('.row', (els) => els.map((e) => e.dataset.id));
+    assert.ok(ids.includes('old-backup/junk.log'), 'the match survives');
+    assert.ok(!ids.includes('keep.txt'), 'non-matches are gone');
+    assert.ok(ids.includes('old-backup'), 'an ancestor is kept so the match has a path');
+  } finally {
+    await p.close();
+  }
+});
+
+test('a slash-wrapped filter is treated as a regex', async () => {
+  const p = await planner(TREE);
+  try {
+    await p.page.locator('#filterBox').fill('/\\.log$/');
+    await p.page.waitForFunction(() => document.querySelectorAll('.row').length < 7);
+    const ids = await p.page.$$eval('.row', (els) => els.map((e) => e.dataset.id));
+    assert.ok(ids.includes('old-backup/junk.log'), 'the regex matches the .log file');
+    assert.ok(!ids.includes('docs/note.md'), 'a .md file does not match /\\.log$/');
+  } finally {
+    await p.close();
+  }
+});
+
+/* ---------------------------------------------------------------- persistence */
+
+test('an edit made in the browser is persisted to the server', async () => {
+  const p = await planner(TREE);
+  try {
+    await dragRow(p.page, 'keep.txt', 'docs', 'into');
+    await p.settled();
+
+    const plan = await p.savedPlan();
+    assert.deepEqual(
+      plan.overrides.find((o) => o.id === 'keep.txt').cur,
+      { name: 'keep.txt', parentId: 'docs' },
+      'the server has the edit, not just the page'
+    );
+  } finally {
+    await p.close();
+  }
+});
+
+test('a plan survives a reload', async () => {
+  const p = await planner(TREE);
+  try {
+    await dragRow(p.page, 'keep.txt', 'docs', 'into');
+    await p.settled();
+    await p.page.reload();
+    await p.page.waitForSelector('.row');
+
+    assert.equal((await p.node('keep.txt')).parentId, 'docs', 'the plan came back from disk');
+    const ids = await p.page.$$eval('.row', (els) => els.map((e) => e.dataset.id));
+    assert.ok(ids.includes('keep.txt'), 'the moved node is rendered under its new parent');
+  } finally {
+    await p.close();
+  }
+});
+
+/* ---------------------------------------------------------------- apply gate */
+
+test('without --allow-apply the browser cannot apply, and says why', async () => {
+  const p = await planner(TREE, { allowApply: false });
+  try {
+    await dragRow(p.page, 'keep.txt', 'docs', 'into');
+    const res = await p.page.evaluate(async () => {
+      const { store } = await import('/lib/store.js');
+      const { api } = await import('/lib/api.js');
+      try {
+        await api.post('/api/apply', { plan: store.serialize(), dryRun: false });
+        return { ok: true };
+      } catch (e) {
+        return { ok: false, message: String(e.message || e) };
+      }
+    });
+    assert.equal(res.ok, false);
+    assert.match(res.message, /--allow-apply/);
+  } finally {
+    await p.close();
+  }
+});
+
+/* ---------------------------------------------------------------- theme */
+
+test('the theme button cycles auto, dark, light and persists', async () => {
+  const p = await planner(TREE, { colorScheme: 'light' });
+  try {
+    const btn = p.page.locator('.btn[data-theme-btn]');
+    assert.equal(await btn.textContent(), 'auto');
+    // Following a light OS, so the page should be light before any override.
+    assert.equal(await p.page.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(251, 250, 247)');
+
+    await btn.click();
+    assert.equal(await btn.textContent(), 'dark');
+    assert.equal(await p.page.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(15, 16, 18)');
+    assert.equal(await p.page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'dark');
+
+    await p.settled();
+    await p.page.reload();
+    await p.page.waitForSelector('.row');
+    assert.equal(await p.page.locator('.btn[data-theme-btn]').textContent(), 'dark', 'the override outlives a reload');
+  } finally {
+    await p.close();
+  }
+});
+
+/* ---------------------------------------------------------------- escaping */
+
+test('a filename that looks like markup is rendered as text, not parsed', async () => {
+  // Every string in the tree is untrusted input. app.js builds DOM with
+  // textContent rather than innerHTML for exactly this; the test pins it.
+  const p = await planner({ '<img src=x onerror=alert(1)>.txt': 'x', 'safe.txt': 'y' });
+  try {
+    const rendered = await p.page.locator('.row .name').first().textContent();
+    assert.match(rendered, /<img/, 'the angle brackets survive as literal text');
+    assert.equal(await p.page.locator('img').count(), 0, 'no element was created from the name');
+    assert.deepEqual(p.errors, []);
+  } finally {
+    await p.close();
+  }
+});
