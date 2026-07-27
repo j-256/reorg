@@ -203,7 +203,7 @@ If CI fails *before* the registry accepts the upload – a bad tag, a failed tes
 npm run retag
 ```
 
-Once a version is on the registry it is spent; npm does not allow republishing it. A failure after that point (the smoke test, the GitHub release step) means the package is live and the fix is the next patch, not a retag.
+Once a version is on the registry it is spent; npm does not allow republishing it. A failure after that point means the package is live and the fix is the next patch, not a retag. The GitHub release is therefore cut whenever the publish succeeded, even if the registry smoke test then fails – a slow-propagating registry should not also cost you the release.
 
 Publishing uses an `NPM_TOKEN` secret scoped to this package alone. npm's trusted publishing (OIDC) would remove the token entirely, but it cannot perform a package's *first* publish – npmjs.com only exposes those settings for a package that already exists. So once a version is on the registry, the token can be retired: register `release.yml` as a trusted publisher, drop the `NODE_AUTH_TOKEN` line from the publish step, and revoke the secret. The two mechanisms coexist safely, because npm falls back to the configured credential whenever the OIDC exchange does not succeed.
 

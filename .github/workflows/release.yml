@@ -115,6 +115,7 @@ jobs:
       # it), so a dry run proves packing and validation -- not credentials,
       # provenance, or registry acceptance.
       - name: Publish to npm
+        id: publish # the release step below keys off this step's conclusion
         run: |
           set -euo pipefail
           set -- --provenance --access public
@@ -152,8 +153,13 @@ jobs:
           echo "Error: reorg-cli@$version did not become installable from the registry"
           exit 1
 
+      # `always()` because the publish above is irreversible: once a version is
+      # on the registry, a flaky smoke test must not cost us the release too. A
+      # failing step otherwise skips everything after it regardless of its own
+      # condition, which would leave a live package with no release. Gated on
+      # the publish step specifically so a failed publish still skips this.
       - name: Create the GitHub release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
+        if: ${{ always() && steps.publish.conclusion == 'success' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
         run: gh release create "$GITHUB_REF_NAME" artifacts/*.tgz --title "$GITHUB_REF_NAME" --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
