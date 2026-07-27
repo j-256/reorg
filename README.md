@@ -133,7 +133,9 @@ Emptiness is deliberately not a signal: empty directories are often intentional 
 
 ### Why age is not a signal
 
-The screenshots above are a synthetic directory built by `npm run screenshots`, so everything in them is minutes old. The ranking was tuned against a different sample – one real, long-neglected scratch directory – where mtime and disposability turned out to be close to unrelated:
+Look at the ages the triage panel prints above: every flagged candidate is *recent* – 3, 12, 34 days. Nothing there is old, because in a directory that got away from you the junk is usually the newest thing in it. Sorting by mtime would push all six candidates to the bottom.
+
+That inversion is why the ranking works the way it does, and it is not invented for the screenshot. Measured against a real long-neglected scratch directory:
 
 - The clearly-disposable entries – a `-backup-20260425` directory, a `.zip` still sitting beside its unpacked copy, a downloaded `.dmg` – had ages spanning 12 to 586 days, so age separated them from nothing. Seven of eight `-backup-`/`-dryrun-` directories were all *12 days old*: an age sort would have called them active work.
 - What age surfaced at the top instead were keepers – an example image kept on purpose for two years, a reference screenshot, a script still in use.
