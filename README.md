@@ -181,6 +181,32 @@ npm test
 
 `reorg` serves on loopback with a per-run token in the URL. That is not theatre: the API can read file contents and, with `--allow-apply`, move files. A token means another process on the machine, or a stray browser tab, cannot drive it. Path parameters are confined to the scan root, so `../../etc/passwd` is rejected rather than served.
 
+## Releasing
+
+```bash
+npm version patch   # or minor, major
+```
+
+That runs a guard (on `main`, in sync with `origin/main`), runs the dependency-free suite, bumps the version, commits, tags, and pushes. The tag push is what triggers the release: CI re-checks that the tag sits on `main` and matches `package.json`, re-runs the tests and the packed-install check, publishes to npm with a provenance attestation, installs the result from the registry to confirm it is really there, and opens a GitHub release with the tarball attached.
+
+To exercise the pipeline without publishing, dispatch it manually – `dry_run` defaults to true:
+
+```bash
+gh workflow run release.yml
+```
+
+A dry run proves that the package builds, packs, installs, and passes its tests. It does not prove the publish itself: npm skips the entire publish path under `--dry-run`, so credentials, provenance, and registry acceptance are only exercised by a real release.
+
+If CI fails *before* the registry accepts the upload – a bad tag, a failed test, a provenance error – the version number is untouched and you can move the tag:
+
+```bash
+npm run retag
+```
+
+Once a version is on the registry it is spent; npm does not allow republishing it. A failure after that point (the smoke test, the GitHub release step) means the package is live and the fix is the next patch, not a retag.
+
+Publishing uses an `NPM_TOKEN` secret scoped to this package alone. npm's trusted publishing (OIDC) would remove the token entirely, but it cannot perform a package's *first* publish – npmjs.com only exposes those settings for a package that already exists. So once a version is on the registry, the token can be retired: register `release.yml` as a trusted publisher, drop the `NODE_AUTH_TOKEN` line from the publish step, and revoke the secret. The two mechanisms coexist safely, because npm falls back to the configured credential whenever the OIDC exchange does not succeed.
+
 ## License
 
 AGPL-3.0-only. See [LICENSE](LICENSE).
