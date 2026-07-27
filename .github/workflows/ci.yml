@@ -78,6 +78,52 @@ jobs:
           fi
           exit "$status"
 
+  # The browser tests live in their own job rather than in the matrix above. That
+  # matrix deliberately installs nothing -- it is the proof that `npm test` runs on
+  # a bare checkout -- and adding a browser download to all six legs would cost
+  # minutes to re-verify what one leg already establishes. One Node version is
+  # enough here: what is under test is Chromium's layout and event behaviour, not
+  # Node's.
+  browser:
+    runs-on: ubuntu-latest
+    name: browser tests (ui + a11y)
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      # --with-deps pulls the shared libraries headless Chromium needs on a bare
+      # runner; without it the launch fails with a missing .so rather than a test
+      # failure. Only chromium: the suite asserts on one engine's geometry.
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Configure git identity for the sandbox repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          git config --global init.defaultBranch main
+
+      - name: Run browser tests
+        run: |
+          printf '\n**browser tests**\n\n' >> "$GITHUB_STEP_SUMMARY"
+          npm run test:ui 2>&1 | tee ui.log
+          status=${PIPESTATUS[0]}
+          if [ "$status" -eq 0 ]; then
+            echo "✅ $(grep -E '^. (tests|pass) ' ui.log | tr '\n' ' ')" >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo '```'
+              cat ui.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit "$status"
+
   # A tarball that omits a source file would install broken while every test
   # passes, so verify what `npm publish` would actually ship.
   package:
