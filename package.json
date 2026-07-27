@@ -15,7 +15,8 @@
   "scripts": {
     "test": "node --test --test-reporter=spec \"test/*.test.js\"",
     "test:ui": "node --test --test-reporter=spec \"test/*.spec.js\"",
-    "test:all": "npm test && npm run test:ui"
+    "test:all": "npm test && npm run test:ui",
+    "screenshots": "node scripts/screenshots.mjs"
   },
   "dependencies": {},
   "devDependencies": { "playwright": "^1.61.1" }

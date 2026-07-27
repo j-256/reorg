@@ -8,6 +8,8 @@ npx reorg-cli ~/Downloads
 
 That scans the directory, opens a planner in your browser, and prints a URL. Drag folders around, rename things, mark junk for trash. Nothing touches disk until you say so.
 
+![The planner mid-edit: a new folder, two moves, two entries marked for trash](docs/planner.png)
+
 No runtime dependencies, no build step, no config file. One Node script and a page.
 
 ## Why
@@ -74,7 +76,9 @@ Sibling order is *derived* (folders first, then natural sort), never stored. Dra
 
 ## Safety
 
-Applying a reorganization is the part that can ruin your afternoon, so:
+Applying a reorganization is the part that can ruin your afternoon, so the plan is always shown as the exact operations it resolves to, in order, before anything runs:
+
+![Review panel listing the resolved operations in order, with a dry-run button](docs/review.png)
 
 - **Dry run is the default.** `reorg apply` prints and exits. Only `--yes` moves anything. The browser cannot apply at all unless you started it with `--allow-apply`.
 - **Nothing is deleted.** "Trash" moves into `.reorg/trash/<run>/`. Emptying that is a separate decision you make yourself.
@@ -109,6 +113,8 @@ Summaries are stored in the plan and keyed by path, so they survive a rescan.
 ## Triage: what looks disposable
 
 `reorg triage` ranks entries that look like junk and says why, so a directory that has got away from you starts with a shortlist instead of a scroll. The same list is in the planner behind the **triage** button, where each row has a mark-for-trash button.
+
+![Triage panel: each candidate carries the signals that flagged it and a plain-language reason](docs/triage.png)
 
 **It ranks names and structure, not age.** That is the opposite of the obvious design, and it is deliberate. Measured against a real scratch directory, mtime barely correlated with disposability:
 
