@@ -28,6 +28,14 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # Load-bearing for authentication, not deployment bookkeeping: npm's trusted
+    # publisher for this package specifies environment `prd`, and GitHub only
+    # puts an `environment` claim in the OIDC token when the job declares one.
+    # Without this the claim is absent, npm finds no matching publisher, and the
+    # exchange fails with "package not found" -- after which the publish runs
+    # unauthenticated and the registry answers E404. Renaming this, or the
+    # environment on npmjs.com, breaks publishing until both agree.
+    environment: prd
     steps:
       - uses: actions/checkout@v6
         with:
@@ -119,13 +127,17 @@ jobs:
           ./node_modules/.bin/reorg apply sample
           test -f sample/keep.txt
 
-      # No credential here on purpose. npm is configured with this repo and this
-      # workflow filename as a trusted publisher, so it exchanges the Actions
-      # OIDC token (id-token: write, above) for a short-lived publish token. That
-      # leaves nothing long-lived to leak or rotate. Note the exchange only ever
-      # ADDS auth -- npm's oidc helper returns quietly on any failure rather than
-      # throwing, so a broken trusted-publisher config surfaces as an auth error
-      # from the publish itself, not as a confusing fallback.
+      # No credential here on purpose. npm is configured with this repo, this
+      # workflow filename, and the environment above as a trusted publisher, so
+      # it exchanges the Actions OIDC token (id-token: write) for a short-lived
+      # publish token. Nothing long-lived to leak or rotate.
+      #
+      # A mismatch in any of those three fails quietly: npm's oidc helper logs at
+      # verbose and returns undefined, so the publish proceeds with no credential
+      # and the registry answers E404 "you do not have permission" -- which reads
+      # like the package is missing rather than like an auth failure. To see the
+      # real reason, POST the id_token to
+      # /-/npm/v1/oidc/token/exchange/package/<name> and read its message.
       #
       # --access public is mandatory on a first publish, not decoration: npm
       # treats the 404 from a not-yet-published package as "private" and refuses

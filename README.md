@@ -224,7 +224,14 @@ Once a version is on the registry it is spent; npm does not allow republishing i
 
 A publish sends this README to the registry as plaintext, on every release rather than only the first, and a WAF sits in front of `registry.npmjs.org` that rejects request bodies matching attack signatures. So prose here can fail a release: a path-traversal example was once enough. npm reports the block as `E403` with boilerplate about "your security policy", naming neither the WAF nor the cause, so it reads like a credential problem. To tell them apart, PUT the same document with *no* credentials – the WAF answers before npm authenticates, so an HTML 403 indicts the payload while JSON clears it, and an unauthenticated request cannot publish.
 
-Publishing carries no credential at all. npm knows this repository and `release.yml` as a trusted publisher, so it exchanges the workflow's OIDC token for a short-lived publish token – nothing long-lived to leak, rotate, or forget. Two consequences worth knowing: renaming or moving this workflow file breaks authentication until the publisher is re-registered on npmjs.com, and a fork cannot publish, because the OIDC claim names this repository.
+Publishing carries no credential at all. npm knows this repository, `release.yml`, and the `prd` environment as a trusted publisher, so it exchanges the workflow's OIDC token for a short-lived publish token – nothing long-lived to leak, rotate, or forget. A fork cannot publish, because the claim names this repository.
+
+Those three values have to agree with the package's settings on npmjs.com exactly, and all three are easy to break by accident: renaming this workflow file, or renaming the job's `environment:`, or dropping it. GitHub only puts an `environment` claim in the token when the job declares one, so `environment: prd` in `release.yml` is load-bearing for authentication rather than deployment bookkeeping. npm does not validate a trusted publisher when you save it, and a mismatch fails silently at publish time: the exchange is skipped, `npm publish` runs unauthenticated, and the registry answers `E404 ... you do not have permission`, which reads like a missing package. Ask the exchange endpoint directly for the real message:
+
+```bash
+curl -X POST -H "Authorization: Bearer $ID_TOKEN" \
+  https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/reorg-cli
+```
 
 Trusted publishing cannot perform a package's *first* publish, though – npmjs.com only exposes the setting for a package that already exists – so `0.1.0` went out with a short-lived granular token, which was then revoked. Anyone bootstrapping a *new* package from this workflow has to do the same: publish once with an `NPM_TOKEN` secret and `NODE_AUTH_TOKEN` set on the publish step, then register the publisher and remove both.
 

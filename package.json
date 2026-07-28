@@ -1,17 +1,37 @@
 {
   "name": "reorg-cli",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Plan a directory reorganization in your browser, then apply it with an undo script.",
-  "keywords": ["cleanup", "reorganize", "files", "directory", "tree", "planner"],
+  "keywords": [
+    "cleanup",
+    "reorganize",
+    "files",
+    "directory",
+    "tree",
+    "planner"
+  ],
   "license": "AGPL-3.0-only",
   "author": "j-256",
-  "repository": { "type": "git", "url": "git+https://github.com/j-256/reorg.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/j-256/reorg.git"
+  },
   "homepage": "https://github.com/j-256/reorg#readme",
   "bugs": "https://github.com/j-256/reorg/issues",
   "type": "module",
-  "bin": { "reorg": "bin/reorg" },
-  "engines": { "node": ">=22" },
-  "files": ["bin", "src", "web", "README.md", "LICENSE"],
+  "bin": {
+    "reorg": "bin/reorg"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "files": [
+    "bin",
+    "src",
+    "web",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "test": "node --test --test-reporter=spec \"test/*.test.js\"",
     "test:ui": "node --test --test-reporter=spec \"test/*.spec.js\"",
@@ -22,5 +42,7 @@
     "retag": "bash scripts/preversion.sh && git tag -f v$npm_package_version && git push origin v$npm_package_version --force"
   },
   "dependencies": {},
-  "devDependencies": { "playwright": "^1.61.1" }
+  "devDependencies": {
+    "playwright": "^1.61.1"
+  }
 }
