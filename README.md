@@ -52,13 +52,17 @@ npm ci && npx playwright install chromium
 | Command | What it does |
 |---|---|
 | `reorg [dir]` | scan, serve the planner, open a browser |
+| `reorg [dir] --static` | write and open a self-contained planner with no server |
 | `reorg plan [dir]` | print the current plan as operations |
 | `reorg apply [dir]` | dry run: print what would happen, change nothing |
 | `reorg apply [dir] --yes` | apply, writing an undo script first |
+| `reorg apply --plan FILE` | dry-run a plan exported by a static planner |
 | `reorg undo [dir]` | run the most recent undo script |
 | `reorg status [dir]` | what is planned, applied, and undoable |
 | `reorg summarize [dir]` | one-line AI description per file (see below) |
 | `reorg triage [dir]` | rank likely-disposable entries and say why |
+
+Short aliases are `-s` for `--static`, `-o` for `--output`, `-p` for `--port`, `-y` for `--yes`, and `-h` for `--help`. `--plan` stays long-only so `-p` is unambiguously the port.
 
 In the planner:
 
@@ -73,6 +77,28 @@ In the planner:
 Toolbar toggles persist in the plan, so the view you set up is the view you come back to: **git** tints rows by git status, **heat** draws a size bar on each row, and **theme** cycles `auto` (follow the system) through forced `dark` and `light`.
 
 Sibling order is *derived* (folders first, then natural sort), never stored. Dragging something out of a folder and back is a genuine no-op rather than a phantom "reordered" change.
+
+## Static planner
+
+Use `--static` when the planner needs to work without a local HTTP server:
+
+```bash
+reorg ~/Downloads -s
+reorg ~/Downloads -s -o downloads-plan.html
+```
+
+Without `--output`, reorg writes a temporary HTML file and opens it. The page is self-contained: the tree, cleanup candidates, bounded file previews, styles, and browser code are all embedded, so it can be moved and opened directly with a `file://` URL. An explicit output path is never overwritten.
+
+The tradeoff is that a static page cannot rescan the directory, autosave to `.reorg/plan.json`, check the live filesystem, or apply anything. Edits stay in the page until **Review** exports `reorg-plan.json` by download or clipboard. Feed that export back to the CLI:
+
+```bash
+reorg apply --plan ~/Downloads/reorg-plan.json # drift-checked dry run
+reorg apply --plan ~/Downloads/reorg-plan.json --yes # write undo script, then apply
+```
+
+The export carries both the plan and the scan it was drawn against, including the source root. That lets the CLI preserve every intended operation and refuse the batch if a source disappeared or a destination became occupied. Pass an explicit directory after `apply` to use that directory instead of the embedded root. `--plan -` reads the same JSON from standard input.
+
+A static page contains filenames, metadata, summaries, and the embedded file previews. Treat it like the directory data it captures when copying or sharing it.
 
 ## Safety
 
@@ -159,13 +185,14 @@ Move ordering is a topological sort over two constraints: vacate before occupy (
 ## Layout
 
 ```
-bin/reorg          CLI: scan, serve, plan, apply, undo, summarize, status
+bin/reorg          CLI: scan, serve or build static, plan, apply, undo, summarize, status
 src/scan.js        walk a directory, tag git status, summarize collapsed dirs
 src/plan.js        pure resolver: plan -> ordered operations (no fs, no exec)
 src/apply.js       execute, with drift checks, git mv, trash, undo script
 src/summarize.js   Messages API batching + the no-key agent prompt pack
 src/signals.js     cleanup signals: what looks disposable, and why (name, not age)
 src/server.js      stdlib http server, token-gated JSON API
+src/static.js      build a self-contained planner with an embedded read-only API
 src/state.js       .reorg/plan.json load, save, self-ignore
 web/               the planner: tree, drag and drop, preview, review
 test/              unit tests for the resolver, integration tests on real temp dirs

@@ -97,8 +97,8 @@ export function savePlan(root, plan) {
  * entry, once as a pending creation) and report a phantom collision. Notes and
  * summaries are kept -- they are observations about content, not pending moves.
  */
-export function clearAppliedPlan(root) {
-  const plan = loadPlan(root);
+export function clearAppliedPlan(root, sourcePlan = null) {
+  const plan = sourcePlan || loadPlan(root);
   return savePlan(root, { ...plan, overrides: [], created: [] });
 }
 

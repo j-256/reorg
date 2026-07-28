@@ -13,11 +13,18 @@
 
 import { mkdirSync, renameSync, writeFileSync, chmodSync, statSync, lstatSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { join, dirname, relative } from 'node:path';
+import { join, dirname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
 import { OP, describeOp } from './plan.js';
 import { ensureStateDir, stateDir, logLine, STATE_DIR } from './state.js';
 
 const TRASH_DIR = 'trash';
+const OP_PATH_FIELDS = Object.freeze(['from', 'to', 'origFrom', 'finalTo']);
+
+function pathStaysUnderRoot(root, path) {
+  if (typeof path !== 'string' || path === '' || path.includes('\0')) return false;
+  const rel = relative(root, resolvePath(root, path));
+  return rel !== '' && !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
+}
 
 // Presence check that does NOT follow symlinks. `existsSync` resolves the target,
 // so a broken symlink reads as absent -- and scratch directories are full of them
@@ -69,6 +76,15 @@ function isGitRepo(root) {
  */
 export function checkDrift(root, ops) {
   const problems = [];
+  for (const op of ops) {
+    for (const field of OP_PATH_FIELDS) {
+      if (op[field] !== undefined && !pathStaysUnderRoot(root, op[field])) {
+        problems.push(`Plan contains an unsafe ${field} path: ${JSON.stringify(op[field])}.`);
+      }
+    }
+  }
+  if (problems.length) return problems;
+
   // Track paths this run will create, so a move into a just-made dir, or a move
   // whose destination is vacated by an earlier move, is not flagged.
   const willExist = new Set();

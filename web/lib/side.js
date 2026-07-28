@@ -7,8 +7,18 @@
 import { store, pathOf, changesOf } from './store.js';
 import { api } from './api.js';
 import { el } from './dom.js';
-import { editNote, deleteNote, addNote, runApply, fmtBytes, toggleEvict } from '../app.js';
+import {
+  editNote,
+  deleteNote,
+  addNote,
+  runApply,
+  fmtBytes,
+  toggleEvict,
+  downloadPlan,
+  copyPlan,
+} from '../app.js';
 import { revealNode } from './tree.js';
+import { PLAN_EXPORT_FILENAME } from './plan-file.js';
 
 const MODE = Object.freeze({
   NONE: 'none',
@@ -229,6 +239,35 @@ function renderReview(body) {
   }
   body.appendChild(sec);
 
+  if (store.static && !problems.length) {
+    const actions = el('div', 'side-section');
+    actions.appendChild(el('h3', null, 'continue in the terminal'));
+    const row = el('div', 'note-acts');
+    const download = el('button', 'btn', 'download plan');
+    download.addEventListener('click', downloadPlan);
+    const copy = el('button', 'btn', 'copy plan JSON');
+    copy.addEventListener('click', copyPlan);
+    row.append(download, copy);
+    actions.appendChild(row);
+    actions.appendChild(
+      el(
+        'p',
+        'note-empty',
+        `Run  reorg apply --plan <path-to-${PLAN_EXPORT_FILENAME}>  for a drift-checked dry run. ` +
+          'Add  --yes  only after reviewing that output.'
+      )
+    );
+    actions.appendChild(
+      el(
+        'p',
+        'note-empty',
+        'The export carries this snapshot with the plan, so the CLI can refuse changes that no longer match disk.'
+      )
+    );
+    body.appendChild(actions);
+    return;
+  }
+
   if (!ops.length || problems.length) return;
 
   // Action row. Dry run is always available; the real apply is gated on the flag
@@ -295,8 +334,11 @@ function renderNotes(body) {
       el(
         'p',
         'note-empty',
-        'No notes yet. Right-click an entry and pick "add a note" to record why it moves, ' +
-          'or what you still need to decide. Notes are saved with the plan, so they survive a reload.'
+        store.static
+          ? 'No notes yet. Right-click an entry and pick "add a note" to record why it moves, ' +
+              'or what you still need to decide. Export the plan to keep notes from this static page.'
+          : 'No notes yet. Right-click an entry and pick "add a note" to record why it moves, ' +
+              'or what you still need to decide. Notes are saved with the plan, so they survive a reload.'
       )
     );
   }
@@ -458,10 +500,14 @@ function renderHelp(body) {
     el(
       'p',
       'note-empty',
-      'Nothing you do here touches disk. Your plan is a diff against the scan, saved to ' +
-        '.reorg/plan.json as you work, and applied only when you ask. Sibling order is derived ' +
-        '(folders first, then alphabetical), so dragging something out and back is a genuine no-op ' +
-        'rather than a phantom change.'
+      store.static
+        ? 'Nothing you do here touches disk. Your plan is a diff against the embedded scan and stays ' +
+            'in this page until you export it from Review. Sibling order is derived (folders first, then ' +
+            'alphabetical), so dragging something out and back is a genuine no-op rather than a phantom change.'
+        : 'Nothing you do here touches disk. Your plan is a diff against the scan, saved to ' +
+            '.reorg/plan.json as you work, and applied only when you ask. Sibling order is derived ' +
+            '(folders first, then alphabetical), so dragging something out and back is a genuine no-op ' +
+            'rather than a phantom change.'
     )
   );
   about.appendChild(

@@ -23,11 +23,18 @@ import {
   closeSide,
 } from './lib/side.js';
 import { toast, el } from './lib/dom.js';
+import { createPlanExport, PLAN_EXPORT_FILENAME } from './lib/plan-file.js';
 
 const $ = (s) => document.querySelector(s);
 
 let saveTimer = null;
 let saveState = 'clean';
+
+window.addEventListener('beforeunload', (event) => {
+  if (!store.static || saveState !== 'dirty') return;
+  event.preventDefault();
+  event.returnValue = '';
+});
 
 /* ---------------------------------------------------------------- persistence */
 // The plan lives on disk, so there is no export/import dance: every edit debounces
@@ -36,6 +43,10 @@ let saveState = 'clean';
 export function markDirty() {
   saveState = 'dirty';
   renderSaveState();
+  if (store.static) {
+    renderAll();
+    return;
+  }
   clearTimeout(saveTimer);
   saveTimer = setTimeout(save, 350);
   renderAll();
@@ -59,6 +70,16 @@ function renderSaveState() {
   const s = $('#saveState');
   s.classList.toggle('dirty', saveState === 'dirty' || saveState === 'saving');
   s.classList.toggle('error', saveState === 'error');
+  if (store.static) {
+    s.textContent =
+      saveState === 'exported'
+        ? 'plan exported'
+        : saveState === 'dirty'
+          ? 'not exported'
+          : 'static snapshot';
+    s.title = 'This page cannot save changes; export the plan from Review';
+    return;
+  }
   const map = {
     clean: store.savedAt ? 'saved to .reorg/plan.json' : 'no changes yet',
     dirty: 'unsaved\u2026',
@@ -66,6 +87,51 @@ function renderSaveState() {
     error: 'SAVE FAILED',
   };
   s.textContent = map[saveState];
+}
+
+function exportedPlanText() {
+  return JSON.stringify(createPlanExport(store.scan, store.serialize()), null, 2) + '\n';
+}
+
+function markExported() {
+  saveState = 'exported';
+  renderSaveState();
+}
+
+export function downloadPlan() {
+  const blob = new Blob([exportedPlanText()], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = PLAN_EXPORT_FILENAME;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+  markExported();
+  toast(`Downloaded ${PLAN_EXPORT_FILENAME}`);
+}
+
+export async function copyPlan() {
+  const text = exportedPlanText();
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const field = document.createElement('textarea');
+    field.value = text;
+    field.style.position = 'fixed';
+    field.style.opacity = '0';
+    document.body.appendChild(field);
+    field.select();
+    const copied = document.execCommand('copy');
+    field.remove();
+    if (!copied) {
+      toast('Could not copy the plan; download it instead', true);
+      return;
+    }
+  }
+  markExported();
+  toast('Copied plan JSON');
 }
 
 /* ---------------------------------------------------------------- delta rail */
@@ -184,7 +250,9 @@ function buildToolbar() {
   mk('review', 'the exact operations this plan resolves to', () => showReview());
   sep();
 
-  mk('rescan', 'reread the directory from disk, keeping your plan', () => rescan());
+  if (!store.static) {
+    mk('rescan', 'reread the directory from disk, keeping your plan', () => rescan());
+  }
   mk('revert', 'discard the whole plan and start over', () => revertAll());
   mk('?', 'keyboard shortcuts', () => showHelp());
 

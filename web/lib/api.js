@@ -3,12 +3,19 @@
  * written to be actionable ("restart with --allow-apply"), so losing them hurts. */
 
 let token = '';
+let requestHandler = null;
 
 export function setToken(t) {
   token = t || '';
 }
 
+export function setRequestHandler(handler) {
+  requestHandler = handler;
+}
+
 async function request(method, path, body) {
+  if (requestHandler) return requestHandler(method, path, body);
+
   let res;
   try {
     res = await fetch(path, {

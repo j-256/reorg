@@ -1,47 +1,55 @@
 #!/usr/bin/env node
 // reorg -- plan a directory reorganization in the browser, apply it with an undo script.
 
-import { existsSync, statSync } from 'node:fs';
-import { resolve as resolvePath } from 'node:path';
+import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
+import { join, resolve as resolvePath } from 'node:path';
+import { tmpdir } from 'node:os';
+import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createReorgServer } from '../src/server.js';
-import { scan } from '../src/scan.js';
+import { scan, readGitignore, formatBytes } from '../src/scan.js';
 import { loadPlan, listUndoScripts, stateDir, planPath, clearAppliedPlan } from '../src/state.js';
 import { resolve as resolvePlan, describeOp } from '../src/plan.js';
 import { apply } from '../src/apply.js';
 import { summarize, emitPrompts, ingestSummaries, DEFAULT_MODEL } from '../src/summarize.js';
 import { analyze, ranked } from '../src/signals.js';
-import { formatBytes } from '../src/scan.js';
+import { writeStaticPlanner } from '../src/static.js';
+import { parsePlanExport } from '../web/lib/plan-file.js';
 
 const HELP = `reorg -- plan a directory reorganization, then apply it safely.
 
 USAGE
   reorg [dir]                    scan dir (default .), serve the planner, open a browser
+  reorg [dir] --static           write one self-contained planner page instead
   reorg plan [dir]               print the current plan as operations, then exit
   reorg apply [dir]              dry run: print what would happen, change nothing
   reorg apply [dir] --yes        actually apply, writing an undo script first
+  reorg apply --plan FILE        use a plan exported by a static planner
   reorg undo [dir]               run the most recent undo script
   reorg summarize [dir]          one-line AI summary per file (see SUMMARIES)
   reorg triage [dir]             rank likely-disposable entries (see TRIAGE)
   reorg status [dir]             what is planned, what is applied, what can be undone
 
 OPTIONS
-  --port N          listen on N (default: first free port from 7777)
-  --no-open         do not launch a browser
-  --allow-apply     let the browser apply the plan; off by default, so the web UI
-                    can only dry-run and the destructive step stays in the terminal
-  --yes             with 'apply': execute instead of dry-running
-  --all             descend into everything, ignoring the collapse rules
-  --no-hidden       skip dotfiles entirely
-  --max-nodes N     stop scanning past N entries (default 20000)
-  --collapse-over N show any dir holding more than N files as one row (default 400)
-  --depth N         stop descending past depth N (default 24)
-  --emit-prompts    with 'summarize': write a prompt pack for your coding agent
-  --ingest          with 'summarize': merge an agent-filled summaries.json
-  --model ID        with 'summarize': model to call (default ${DEFAULT_MODEL})
-  --force           with 'summarize': re-summarize files that already have one
-  --limit N         with 'triage': show at most N candidates (default 30)
-  -h, --help        this text
+  -p, --port N       listen on N (default: first free port from 7777)
+  --no-open          do not launch a browser
+  -s, --static       write and open a self-contained HTML planner, with no server
+  -o, --output FILE  with --static: write FILE instead of a temporary page
+  --plan FILE        with 'apply': read an exported plan; use - for stdin
+  --allow-apply      let the browser apply the plan; off by default, so the web UI
+                     can only dry-run and the destructive step stays in the terminal
+  -y, --yes          with 'apply': execute instead of dry-running
+  --all              descend into everything, ignoring the collapse rules
+  --no-hidden        skip dotfiles entirely
+  --max-nodes N      stop scanning past N entries (default 20000)
+  --collapse-over N  show any dir holding more than N files as one row (default 400)
+  --depth N          stop descending past depth N (default 24)
+  --emit-prompts     with 'summarize': write a prompt pack for your coding agent
+  --ingest           with 'summarize': merge an agent-filled summaries.json
+  --model ID         with 'summarize': model to call (default ${DEFAULT_MODEL})
+  --force            with 'summarize': re-summarize files that already have one
+  --limit N          with 'triage': show at most N candidates (default 30)
+  -h, --help         this text
 
 SUMMARIES
   Two paths, both optional:
@@ -62,16 +70,26 @@ TRIAGE
 SAFETY
   Nothing is deleted. "Trash" moves into .reorg/trash/<run>/, recoverable by the
   undo script. Every apply writes .reorg/undo-<run>.sh before it starts, and
-  aborts entirely if the tree changed since the scan. Your plan lives in
-  .reorg/plan.json; the whole .reorg directory is git-ignored automatically.
+  aborts entirely if the tree changed since the scan. A live plan lives in
+  .reorg/plan.json; a static plan stays in the page until you export it.
 `;
 
 function parseArgs(argv) {
   const opts = { _: [] };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
+    const value = () => {
+      const next = argv[i + 1];
+      if (next === undefined || (next.startsWith('-') && next !== '-')) {
+        console.error(`reorg: ${a} requires a value\nTry: reorg --help`);
+        process.exit(2);
+      }
+      i++;
+      return next;
+    };
     if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '--no-open') opts.open = false;
+    else if (a === '--static' || a === '-s') opts.static = true;
     else if (a === '--allow-apply') opts.allowApply = true;
     else if (a === '--yes' || a === '-y') opts.yes = true;
     else if (a === '--all') opts.all = true;
@@ -80,12 +98,14 @@ function parseArgs(argv) {
     else if (a === '--ingest') opts.ingest = true;
     else if (a === '--force') opts.force = true;
     else if (a === '--json') opts.json = true;
-    else if (a === '--port') opts.port = parseInt(argv[++i], 10);
-    else if (a === '--max-nodes') opts.maxNodes = parseInt(argv[++i], 10);
-    else if (a === '--collapse-over') opts.collapseOver = parseInt(argv[++i], 10);
-    else if (a === '--depth') opts.maxDepth = parseInt(argv[++i], 10);
-    else if (a === '--model') opts.model = argv[++i];
-    else if (a === '--limit') opts.limit = parseInt(argv[++i], 10);
+    else if (a === '--output' || a === '-o') opts.output = value();
+    else if (a === '--plan') opts.planInput = value();
+    else if (a === '--port' || a === '-p') opts.port = parseInt(value(), 10);
+    else if (a === '--max-nodes') opts.maxNodes = parseInt(value(), 10);
+    else if (a === '--collapse-over') opts.collapseOver = parseInt(value(), 10);
+    else if (a === '--depth') opts.maxDepth = parseInt(value(), 10);
+    else if (a === '--model') opts.model = value();
+    else if (a === '--limit') opts.limit = parseInt(value(), 10);
     else if (a.startsWith('-')) {
       console.error(`reorg: unknown option ${a}\nTry: reorg --help`);
       process.exit(2);
@@ -117,6 +137,24 @@ function scanOpts(opts) {
     maxDepth: opts.maxDepth,
     collapseOver: opts.collapseOver,
   };
+}
+
+function readPlanInput(inputPath) {
+  if (!inputPath) throw new Error('--plan requires a file path, or - for stdin');
+  let text;
+  try {
+    text = readFileSync(inputPath === '-' ? 0 : resolvePath(inputPath), 'utf8');
+  } catch (e) {
+    const label = inputPath === '-' ? 'stdin' : resolvePath(inputPath);
+    throw new Error(`could not read plan from ${label} (${e.message})`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`plan input is not valid JSON (${e.message})`);
+  }
+  return parsePlanExport(parsed);
 }
 
 function openBrowser(url) {
@@ -164,9 +202,9 @@ function printOps(ops, stats) {
   console.log(`\n${bits.join(', ')}.`);
 }
 
-function loadResolved(root, opts) {
-  const s = scan(root, scanOpts(opts));
-  const plan = loadPlan(root);
+function loadResolved(root, opts, imported = null) {
+  const s = imported && imported.scan ? { ...imported.scan, root } : scan(root, scanOpts(opts));
+  const plan = imported ? imported.plan : loadPlan(root);
   const resolved = resolvePlan(s, plan);
   if (resolved.problems.length) {
     console.error('This plan cannot be applied as-is:\n');
@@ -174,7 +212,7 @@ function loadResolved(root, opts) {
     console.error('\nFix it in the planner, then try again.');
     process.exit(1);
   }
-  return resolved;
+  return { ...resolved, plan };
 }
 
 async function main() {
@@ -187,7 +225,22 @@ async function main() {
 
   const [first, second] = opts._;
   const cmd = KNOWN.has(first) ? first : 'serve';
-  const root = resolveRoot(KNOWN.has(first) ? second : first);
+  if (opts.planInput && cmd !== 'apply') {
+    throw new Error('--plan can only be used with reorg apply');
+  }
+  if (opts.output && !opts.static) {
+    throw new Error('--output can only be used with --static');
+  }
+  if (opts.static && cmd !== 'serve') {
+    throw new Error('--static cannot be combined with another command');
+  }
+  if (opts.static && opts.allowApply) {
+    throw new Error('--allow-apply is unavailable with --static');
+  }
+
+  const imported = opts.planInput ? readPlanInput(opts.planInput) : null;
+  const rootArg = KNOWN.has(first) ? second : first;
+  const root = resolveRoot(rootArg || (imported && imported.sourceRoot) || '.');
 
   // ---- plan --------------------------------------------------------------
   if (cmd === 'plan') {
@@ -198,12 +251,19 @@ async function main() {
 
   // ---- apply -------------------------------------------------------------
   if (cmd === 'apply') {
-    const { ops, stats } = loadResolved(root, opts);
+    const { ops, stats, plan } = loadResolved(root, opts, imported);
     if (!ops.length) {
       console.log('Nothing to apply.');
       return;
     }
     if (!opts.yes) {
+      const checked = apply(root, ops, { dryRun: true });
+      if (checked.problems.length) {
+        console.error('This plan no longer matches the directory:\n');
+        for (const p of checked.problems) console.error(`  - ${p}`);
+        console.error('\nNothing was changed. Regenerate the static planner or rescan the live planner.');
+        process.exit(1);
+      }
       console.log(`DRY RUN -- nothing will change. ${ops.length} operation(s):\n`);
       printOps(ops, stats);
       console.log('\nRun again with --yes to apply. An undo script is written first.');
@@ -220,7 +280,7 @@ async function main() {
     // The plan has been realized, so retire it. Leaving it would make the next
     // resolve see created folders both on disk and as pending, and report a
     // collision that does not exist.
-    clearAppliedPlan(root);
+    clearAppliedPlan(root, plan);
     console.log(`\nDone: ${res.applied} operation(s).`);
     console.log(`Undo with:  reorg undo ${root === process.cwd() ? '' : root}`.trimEnd());
     console.log(`         or: bash ${res.undoPath}`);
@@ -361,6 +421,37 @@ async function main() {
     console.log(`Undo:     ${undos.length ? `${undos.length} script(s), latest ${undos[0]}` : 'none'}`);
     const summaries = Object.keys(plan.summaries || {}).length;
     console.log(`Summaries: ${summaries || 'none'}`);
+    return;
+  }
+
+  // ---- static planner ----------------------------------------------------
+  if (opts.static) {
+    const initial = scan(root, scanOpts(opts));
+    const output = opts.output
+      ? resolvePath(opts.output)
+      : join(mkdtempSync(join(tmpdir(), 'reorg-static-')), 'planner.html');
+    const result = writeStaticPlanner(output, {
+      root,
+      scan: initial,
+      plan: loadPlan(root),
+      gitignore: readGitignore(root),
+      undoScripts: listUndoScripts(root),
+    });
+    const url = pathToFileURL(output).href;
+
+    console.log(`reorg  ${root}`);
+    console.log(
+      `       ${initial.counts.nodes} entries, ${formatBytes(initial.counts.bytes)}, static snapshot`
+    );
+    console.log(`\n  ${output}\n`);
+    if (result.previewStats.omitted) {
+      console.log(
+        `Embedded ${result.previewStats.included} file preview(s); ${result.previewStats.omitted} omitted by the page size limit.`
+      );
+    }
+    console.log('Export the finished plan from Review, then dry-run it with:');
+    console.log('  reorg apply --plan <path-to-reorg-plan.json>\n');
+    if (opts.open !== false) openBrowser(url);
     return;
   }
 

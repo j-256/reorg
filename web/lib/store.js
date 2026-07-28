@@ -20,10 +20,12 @@ export const store = {
   savedAt: null,
   selectedId: null,
   allowApply: false,
+  static: false,
   undoScripts: [],
 
   init(data) {
     this.allowApply = !!data.allowApply;
+    this.static = !!data.static;
     this.undoScripts = data.undoScripts || [];
     this.applyScan(data.scan, data.plan || {});
     this.savedAt = (data.plan && data.plan.savedAt) || null;
