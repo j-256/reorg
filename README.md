@@ -227,7 +227,7 @@ To exercise the pipeline without publishing, dispatch it manually – `dry_run` 
 gh workflow run release.yml
 ```
 
-A dry run proves that the package builds, packs, installs, and passes its tests. It does not prove the publish itself: npm skips the entire publish path under `--dry-run`, so credentials, provenance, and registry acceptance are only exercised by a real release.
+A dry run proves that the package builds, packs, installs, and passes its tests. It skips the registry-facing publish step entirely, so credentials, provenance, and registry acceptance are only exercised by a real release.
 
 Unchecking `dry_run` on a manual dispatch is a real publish, and not the way to cut a release: dispatching has no tag, so both tag checks are skipped and no GitHub release is created – npm gets the version, the repo does not. Release by pushing a tag.
 

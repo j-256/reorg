@@ -173,21 +173,14 @@ jobs:
       # treats the 404 from a not-yet-published package as "private" and refuses
       # to generate provenance without it. Harmless on every later release.
       #
-      # Note --dry-run skips the publish path entirely (npm gates libpub behind
-      # it), so a dry run proves packing and validation -- not credentials,
-      # provenance, or registry acceptance.
+      # Skip the registry-facing command entirely for a dry run
+      # npm publish --dry-run still rejects versions already on the registry,
+      # making repeatable workflow validation impossible while proving no
+      # credentials, provenance, or registry acceptance
       - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
         id: publish # the release step below keys off this step's conclusion
-        run: |
-          set -euo pipefail
-          set -- --provenance --access public
-          if [ "${DRY_RUN:-}" = "true" ]; then
-            set -- "$@" --dry-run
-          fi
-          echo "npm publish $*"
-          npm publish "$@"
-        env:
-          DRY_RUN: ${{ inputs.dry_run }}
+        run: npm publish --provenance --access public
 
       # Distinguishes "we uploaded a tarball" from "a user can install it",
       # which the packed-install check above cannot speak to since it never
