@@ -29,6 +29,7 @@ export async function closeBrowser() {
  *
  * opts.allowApply   let the browser apply (default false, matching the CLI)
  * opts.colorScheme  emulate an OS theme preference
+ * opts.viewport     override the desktop viewport
  */
 export async function planner(layout, opts = {}) {
   const root = sandbox(layout);
@@ -39,7 +40,7 @@ export async function planner(layout, opts = {}) {
   const b = await getBrowser();
   const context = await b.newContext({
     colorScheme: opts.colorScheme || 'dark',
-    viewport: { width: 1280, height: 900 },
+    viewport: opts.viewport || { width: 1280, height: 900 },
   });
   const page = await context.newPage();
 

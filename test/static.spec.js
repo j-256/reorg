@@ -40,7 +40,8 @@ test('the self-contained page plans, previews, reviews, and exports without a se
     await page.goto(pathToFileURL(output).href);
     await page.waitForSelector('.row');
     assert.equal(await page.locator('#saveState').textContent(), 'static snapshot');
-    assert.equal(await page.getByRole('button', { name: 'rescan', exact: true }).count(), 0);
+    assert.match(await page.locator('#scopeBanner').textContent(), /cannot rescan or move files/i);
+    assert.equal(await page.getByRole('button', { name: 'rescan disk', exact: true }).count(), 0);
     const applyError = await page.evaluate(async () => {
       const { api } = await import('reorg:api');
       try {
@@ -62,10 +63,10 @@ test('the self-contained page plans, previews, reviews, and exports without a se
     await page.keyboard.press('Enter');
     assert.equal(await page.locator('#saveState').textContent(), 'not exported');
 
-    await page.getByRole('button', { name: 'review', exact: true }).click();
+    await page.getByRole('button', { name: 'review plan', exact: true }).click();
     await page.waitForSelector('text=continue in the terminal');
     assert.match(await page.locator('#sideBody').textContent(), /keep\.txt\s+->\s+renamed\.txt/);
-    assert.equal(await page.getByRole('button', { name: 'dry run', exact: true }).count(), 0);
+    assert.equal(await page.getByRole('button', { name: 'run safety check', exact: true }).count(), 0);
 
     const downloadEvent = page.waitForEvent('download');
     await page.getByRole('button', { name: 'download plan', exact: true }).click();

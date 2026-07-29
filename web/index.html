@@ -9,45 +9,65 @@
 </head>
 <body>
 
+<a class="skip-link" href="#tree">Skip to directory tree</a>
+
 <header class="topbar">
-  <div class="brand">reorg<span class="brand-sub" id="rootLabel"></span></div>
-  <div class="toolbar" id="toolbar"></div>
+  <h1 class="brand"><span>reorg</span><span class="brand-sub" id="rootLabel"></span></h1>
+  <nav class="toolbar" id="toolbar" aria-label="Planner actions"></nav>
   <div class="spacer"></div>
-  <div class="savestate" id="saveState" title="Your plan autosaves to .reorg/plan.json">&hellip;</div>
+  <div class="savestate" id="saveState" role="status" aria-live="polite" aria-atomic="true" title="Your plan autosaves to .reorg/plan.json">&hellip;</div>
 </header>
 
-<div class="stage" id="stage">
-  <section class="pane tree-pane">
+<main class="stage" id="stage">
+  <section class="pane tree-pane" aria-labelledby="treeTitle">
     <div class="pane-head">
-      <span class="dot"></span>
-      <span>working tree</span>
+      <span class="dot" aria-hidden="true"></span>
+      <h2 id="treeTitle">working tree</h2>
       <span class="pane-hint" id="treeHint"></span>
-      <input class="filter" id="filterBox" type="search" placeholder="filter (name, /regex/)" spellcheck="false">
+      <label class="sr-only" for="filterBox">Filter the directory tree</label>
+      <input class="filter" id="filterBox" type="search" placeholder="name or /regex/" spellcheck="false" aria-describedby="filterHelp filterStatus">
+      <span class="sr-only" id="filterHelp">Enter part of a name or path, or wrap a regular expression in slashes</span>
+      <span class="filter-status" id="filterStatus" role="status" aria-live="polite"></span>
     </div>
-    <div class="scroll" id="treeScroll"><ul class="tree" id="tree"></ul></div>
+    <div class="scope-banner" id="scopeBanner" role="note"></div>
+    <div class="scroll" id="treeScroll"><ul class="tree" id="tree" role="tree" aria-label="Planned directory tree" tabindex="-1"></ul></div>
   </section>
 
-  <div class="resizer" id="resizer" title="drag to resize &middot; double-click to center"></div>
+  <div class="resizer" id="resizer" role="separator" aria-label="Resize the details panel" aria-orientation="vertical" aria-valuemin="20" aria-valuemax="80" aria-valuenow="42" aria-hidden="true" tabindex="-1" title="Drag to resize &middot; double-click to center"></div>
 
-  <aside class="pane side-pane" id="sidePane">
+  <aside class="pane side-pane" id="sidePane" aria-labelledby="sideTitle" hidden>
     <div class="pane-head">
-      <span class="dot alt"></span>
-      <span id="sideTitle">preview</span>
+      <span class="dot alt" aria-hidden="true"></span>
+      <h2 id="sideTitle" tabindex="-1">preview</h2>
       <span class="spacer"></span>
-      <button class="btn ghost" id="sideClose" title="close (Esc)">&times;</button>
+      <button class="btn ghost" id="sideClose" type="button" aria-label="Close details panel" title="Close (Esc)">&times;</button>
     </div>
-    <div class="scroll" id="sideBody"></div>
+    <div class="scroll" id="sideBody" tabindex="0" aria-label="Details panel content"></div>
   </aside>
-</div>
+</main>
 
 <footer class="delta" id="delta"></footer>
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<dialog class="move-dialog" id="moveDialog" aria-labelledby="moveTitle" aria-describedby="moveHelp">
+  <form method="dialog">
+    <h2 id="moveTitle">Move entry</h2>
+    <p class="dialog-intro">Choose the folder that should contain <strong id="moveName"></strong></p>
+    <label for="moveTarget">Destination folder</label>
+    <select id="moveTarget"></select>
+    <p class="note-empty" id="moveHelp">This changes the saved plan only. Files stay on disk until the plan is applied. Sibling order remains folders first, then alphabetical.</p>
+    <div class="dialog-actions">
+      <button class="btn" type="submit" value="cancel">Cancel</button>
+      <button class="btn primary" id="moveConfirm" type="button">Move</button>
+    </div>
+  </form>
+</dialog>
+
 <template id="tpl-row">
   <li>
     <div class="row" draggable="true">
-      <span class="twist"></span>
+      <button class="twist" type="button" tabindex="-1"></button>
       <span class="icon"></span>
       <span class="name"></span>
       <span class="meta"></span>

@@ -50,6 +50,78 @@ test('nothing is marked as changed on a fresh scan', async () => {
   }
 });
 
+test('plan-only scope and unavailable filters are explicit on first load', async () => {
+  const p = await planner(TREE);
+  try {
+    assert.match(await p.page.locator('#scopeBanner').textContent(), /planning only/i);
+    assert.match(await p.page.locator('#scopeBanner').textContent(), /files stay on disk/i);
+    assert.equal(await p.page.locator('#sidePane').getAttribute('hidden'), '');
+
+    const disabled = await p.page.$$eval('#delta button[disabled]', (buttons) =>
+      buttons.map((button) => button.textContent.trim())
+    );
+    assert.deepEqual(disabled, ['0 moved', '0 renamed', '0 new', '0 trashed']);
+
+    const centers = await p.page.$$eval('#delta > .chip', (chips) =>
+      chips.map((chip) => {
+        const box = chip.getBoundingClientRect();
+        return box.top + box.height / 2;
+      })
+    );
+    assert.ok(Math.max(...centers) - Math.min(...centers) < 1, 'all summary chips share a visual baseline');
+  } finally {
+    await p.close();
+  }
+});
+
+test('directories omitted from the scan disclose that their contents are unavailable', async () => {
+  const p = await planner({ 'keep.txt': 'keep', 'node_modules/pkg/index.js': 'module' });
+  try {
+    const row = p.page.locator('.row[data-id="node_modules"]');
+    assert.match(await row.locator('.tag.limited').textContent(), /contents not loaded/i);
+    const disclosure = row.locator('.twist');
+    assert.equal(await disclosure.isDisabled(), true);
+    assert.match(await disclosure.getAttribute('aria-label'), /restart with --all/i);
+    await row.click();
+    await p.page.keyboard.press('Enter');
+    assert.match(await p.page.locator('#toast').textContent(), /summarized during the scan/i);
+  } finally {
+    await p.close();
+  }
+});
+
+test('one toolbar click opens and identifies a panel, and the next closes it', async () => {
+  const p = await planner(TREE);
+  try {
+    const cleanup = p.page.getByRole('button', { name: 'cleanup', exact: true });
+    await cleanup.click();
+    await p.page.waitForSelector('#sidePane:not([hidden])');
+    assert.equal(await cleanup.getAttribute('aria-expanded'), 'true');
+    assert.match(await p.page.locator('#sideTitle').textContent(), /cleanup candidates/i);
+    await p.page.waitForFunction(() => document.activeElement?.id === 'sideTitle');
+
+    await cleanup.click();
+    await p.page.waitForFunction(() => document.querySelector('#sidePane')?.hasAttribute('hidden'));
+    assert.equal(await cleanup.getAttribute('aria-expanded'), 'false');
+    await p.page.waitForFunction(() => document.activeElement?.dataset.panel === 'triage');
+  } finally {
+    await p.close();
+  }
+});
+
+test('one folder click exposes plainly labeled selection actions', async () => {
+  const p = await planner(TREE);
+  try {
+    await p.page.locator('.row[data-id="docs"]').click();
+    assert.match(await p.page.locator('.selection-label').textContent(), /selected:\s*docs/i);
+    for (const name of ['Rename', 'Move\u2026', 'New folder', 'Add note', 'Trash']) {
+      assert.equal(await p.page.getByRole('button', { name, exact: true }).count(), 1, `${name} is available`);
+    }
+  } finally {
+    await p.close();
+  }
+});
+
 /* ---------------------------------------------------------------- drag geometry */
 // The reason this file exists. dropZone() splits a row into thirds: the middle
 // third of a directory means "into", the outer thirds mean "become a sibling".
@@ -273,6 +345,73 @@ test('arrow keys move the selection, and right/left expand and collapse', async 
   }
 });
 
+test('the tree is usable from the keyboard before any row is clicked', async () => {
+  const p = await planner(TREE);
+  try {
+    await p.page.locator('#tree').focus();
+    await p.page.keyboard.press('Tab');
+    assert.equal(await p.page.evaluate(() => document.activeElement?.getAttribute('role')), 'treeitem');
+    assert.ok(await p.page.locator('[role="treeitem"][aria-selected="true"]').count());
+
+    await p.page.keyboard.press('ArrowDown');
+    const selected = await p.page.locator('[role="treeitem"][aria-selected="true"]').getAttribute('data-id');
+    assert.ok(selected);
+
+    await p.page.keyboard.press('m');
+    await p.page.waitForSelector('#moveDialog[open]');
+    assert.match(await p.page.locator('#moveName').textContent(), new RegExp(selected.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+    await p.page.keyboard.press('Escape');
+  } finally {
+    await p.close();
+  }
+});
+
+test('Shift+F10 opens a keyboard-operable action menu', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'docs');
+    await p.page.keyboard.press('Shift+F10');
+    await p.page.waitForSelector('[role="menu"]');
+    assert.equal(await p.page.evaluate(() => document.activeElement?.getAttribute('role')), 'menuitem');
+    await p.page.keyboard.press('ArrowDown');
+    assert.match(await p.page.evaluate(() => document.activeElement?.textContent), /move to another folder/i);
+    await p.page.keyboard.press('Escape');
+    assert.equal(await p.page.locator('[role="menu"]').count(), 0);
+    assert.equal(await p.page.evaluate(() => document.activeElement?.getAttribute('role')), 'treeitem');
+  } finally {
+    await p.close();
+  }
+});
+
+test('switching context menus works on the first right-click', async () => {
+  const p = await planner(TREE);
+  try {
+    await p.page.locator('.row[data-id="notes.md"]').click({ button: 'right' });
+    await p.page.waitForSelector('[role="menu"]');
+    await p.page.locator('.row[data-id="docs"]').click({ button: 'right' });
+
+    assert.equal(await p.page.locator('[role="menu"]').count(), 1);
+    assert.equal(await p.page.evaluate(async () => (await import('/lib/store.js')).store.selectedId), 'docs');
+  } finally {
+    await p.close();
+  }
+});
+
+test('the Move action provides a non-dragging path to reorganize an entry', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'keep.txt');
+    await p.page.getByRole('button', { name: 'Move\u2026', exact: true }).click();
+    await p.page.locator('#moveTarget').selectOption('docs');
+    await p.page.getByRole('button', { name: 'Move into folder', exact: true }).click();
+
+    assert.equal((await p.node('keep.txt')).parentId, 'docs');
+    assert.match(await p.page.locator('#toast').textContent(), /files on disk are unchanged/i);
+  } finally {
+    await p.close();
+  }
+});
+
 test('? opens the shortcuts panel and Escape closes it', async () => {
   const p = await planner(TREE);
   try {
@@ -316,6 +455,18 @@ test('a slash-wrapped filter is treated as a regex', async () => {
     const ids = await p.page.$$eval('.row', (els) => els.map((e) => e.dataset.id));
     assert.ok(ids.includes('old-backup/junk.log'), 'the regex matches the .log file');
     assert.ok(!ids.includes('docs/note.md'), 'a .md file does not match /\\.log$/');
+  } finally {
+    await p.close();
+  }
+});
+
+test('an invalid regular expression is identified instead of silently matching everything', async () => {
+  const p = await planner(TREE);
+  try {
+    const filter = p.page.locator('#filterBox');
+    await filter.fill('/[/');
+    assert.equal(await filter.getAttribute('aria-invalid'), 'true');
+    assert.match(await p.page.locator('#filterStatus').textContent(), /invalid regular expression/i);
   } finally {
     await p.close();
   }
@@ -379,25 +530,46 @@ test('without --allow-apply the browser cannot apply, and says why', async () =>
   }
 });
 
+test('a safety check keeps the reviewed operations and next actions visible', async () => {
+  const p = await planner(TREE, { allowApply: false });
+  try {
+    await dragRow(p.page, 'keep.txt', 'docs', 'into');
+    await p.page.getByRole('button', { name: 'review plan', exact: true }).click();
+    await p.page.waitForSelector('#sideBody .op');
+    await p.page.getByRole('button', { name: 'run safety check', exact: true }).click();
+    await p.page.waitForSelector('text=Safety check passed');
+
+    assert.ok(await p.page.locator('#sideBody .op').count(), 'the operation list remains');
+    assert.equal(await p.page.getByRole('button', { name: 'run safety check', exact: true }).count(), 1);
+    assert.equal(await p.page.getByRole('button', { name: 'apply to disk unavailable', exact: true }).count(), 1);
+  } finally {
+    await p.close();
+  }
+});
+
 /* ---------------------------------------------------------------- theme */
 
 test('the theme button cycles auto, dark, light and persists', async () => {
   const p = await planner(TREE, { colorScheme: 'light' });
   try {
     const btn = p.page.locator('.btn[data-theme-btn]');
-    assert.equal(await btn.textContent(), 'auto');
+    assert.equal(await btn.textContent(), 'theme: system');
     // Following a light OS, so the page should be light before any override.
     assert.equal(await p.page.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(251, 250, 247)');
 
     await btn.click();
-    assert.equal(await btn.textContent(), 'dark');
+    assert.equal(await btn.textContent(), 'theme: dark');
     assert.equal(await p.page.evaluate(() => getComputedStyle(document.body).backgroundColor), 'rgb(15, 16, 18)');
     assert.equal(await p.page.evaluate(() => getComputedStyle(document.documentElement).colorScheme), 'dark');
 
     await p.settled();
     await p.page.reload();
     await p.page.waitForSelector('.row');
-    assert.equal(await p.page.locator('.btn[data-theme-btn]').textContent(), 'dark', 'the override outlives a reload');
+    assert.equal(
+      await p.page.locator('.btn[data-theme-btn]').textContent(),
+      'theme: dark',
+      'the override outlives a reload'
+    );
   } finally {
     await p.close();
   }
@@ -414,6 +586,30 @@ test('a filename that looks like markup is rendered as text, not parsed', async 
     assert.match(rendered, /<img/, 'the angle brackets survive as literal text');
     assert.equal(await p.page.locator('img').count(), 0, 'no element was created from the name');
     assert.deepEqual(p.errors, []);
+  } finally {
+    await p.close();
+  }
+});
+
+test('the narrow layout keeps every toolbar action onscreen and uses one readable pane', async () => {
+  const p = await planner(TREE, { viewport: { width: 320, height: 800 } });
+  try {
+    const overflow = await p.page.$$eval('#toolbar button', (buttons) =>
+      buttons
+        .map((button) => button.getBoundingClientRect())
+        .filter((box) => box.left < 0 || box.right > window.innerWidth)
+        .map((box) => ({ left: box.left, right: box.right }))
+    );
+    assert.deepEqual(overflow, []);
+
+    await p.page.getByRole('button', { name: 'cleanup', exact: true }).click();
+    await p.page.waitForSelector('#sidePane:not([hidden])');
+    const layout = await p.page.evaluate(() => ({
+      treeVisible: getComputedStyle(document.querySelector('.tree-pane')).display !== 'none',
+      sideWidth: document.querySelector('#sidePane').getBoundingClientRect().width,
+    }));
+    assert.equal(layout.treeVisible, false);
+    assert.ok(layout.sideWidth >= 310, `side pane should use the viewport, got ${layout.sideWidth}px`);
   } finally {
     await p.close();
   }

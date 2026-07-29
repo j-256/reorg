@@ -1,21 +1,25 @@
-// Contrast regression tests.
+// Enhanced contrast regression tests
 //
-// The dim end of the palette failed WCAG AA once already -- six text styles between
-// 2.34 and 3.10 against a required 4.5 -- and it failed invisibly, because "looks a
-// bit faint" is not a thing anyone reliably notices in review. This measures it
-// instead, so the next tweak to a colour variable cannot quietly undo the fix.
+// The dim end of the palette failed contrast checks once already -- six text styles
+// between 2.34 and 3.10 -- and it failed invisibly, because "looks a bit faint" is
+// not a thing anyone reliably notices in review. This measures it instead, so the
+// next tweak to a colour variable cannot quietly undo the fix
 //
 // Contrast is computed against the COMPOSITED background rather than the nearest
 // declared one. That distinction is not pedantry: several surfaces here are tinted
 // with color-mix at 18% alpha, and measuring text against the raw rgba of a
 // translucent layer produces false failures. Getting this wrong during the original
-// audit reported a passing button as 2.77.
+// audit reported a passing button as 2.77
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import { planner, closeBrowser } from './ui-harness.js';
 
 after(closeBrowser);
+
+const require = createRequire(import.meta.url);
+const AXE_PATH = require.resolve('axe-core/axe.min.js');
 
 const TREE = {
   'keep.txt': 'keep me',
@@ -25,8 +29,8 @@ const TREE = {
 };
 
 /**
- * Sweep every element with its own text and return those below the WCAG AA
- * threshold: 4.5:1 for normal text, 3:1 for large (>=24px, or >=18.67px bold).
+ * Sweep every element with its own text and return those below the WCAG AAA
+ * enhanced threshold: 7:1 for normal text, 4.5:1 for large text
  */
 const SWEEP = `(() => {
   const lum = ([r, g, b]) => {
@@ -63,18 +67,19 @@ const SWEEP = `(() => {
     if (!own) continue;
     const cs = getComputedStyle(el);
     if (cs.visibility === 'hidden' || cs.display === 'none' || parseFloat(cs.opacity) < 0.5) continue;
-    const key = cs.color + '|' + cs.fontSize + '|' + (el.className || el.tagName);
+    if (el.closest(':disabled, [aria-disabled="true"]')) continue;
+    const bg = effectiveBg(el);
+    const key = cs.color + '|' + cs.fontSize + '|' + bg.map(Math.round).join(',') + '|' + (el.className || el.tagName);
     if (seen.has(key)) continue;
     seen.add(key);
     checked++;
-    const bg = effectiveBg(el);
     const f = toRgba(cs.color);
     const fg = f[3] >= 1 ? f.slice(0, 3) : [f[0] * f[3] + bg[0] * (1 - f[3]), f[1] * f[3] + bg[1] * (1 - f[3]), f[2] * f[3] + bg[2] * (1 - f[3])];
     const a = lum(fg), b = lum(bg);
     const [hi, lo] = a > b ? [a, b] : [b, a];
     const ratio = +(((hi + 0.05) / (lo + 0.05))).toFixed(2);
     const px = parseFloat(cs.fontSize);
-    const need = (px >= 24 || (parseInt(cs.fontWeight) >= 700 && px >= 18.67)) ? 3 : 4.5;
+    const need = (px >= 24 || (parseInt(cs.fontWeight) >= 700 && px >= 18.67)) ? 4.5 : 7;
     if (ratio < need) fails.push({ cls: String(el.className || el.tagName.toLowerCase()).slice(0, 30), px, ratio, need, sample: own.slice(0, 30) });
   }
   return { checked, fails };
@@ -110,7 +115,7 @@ async function openPanel(p, name) {
 }
 
 for (const scheme of ['dark', 'light']) {
-  test(`${scheme} theme: the main view meets WCAG AA`, async () => {
+  test(`${scheme} theme: the main view meets WCAG AAA enhanced contrast`, async () => {
     const p = await planner(TREE, { colorScheme: scheme });
     try {
       await populate(p);
@@ -122,7 +127,7 @@ for (const scheme of ['dark', 'light']) {
     }
   });
 
-  test(`${scheme} theme: every side panel meets WCAG AA`, async () => {
+  test(`${scheme} theme: every side panel meets WCAG AAA enhanced contrast`, async () => {
     const p = await planner(TREE, { colorScheme: scheme });
     try {
       await populate(p);
@@ -192,6 +197,93 @@ test('every actionable control has an accessible name', async () => {
         .map((e) => e.outerHTML.slice(0, 80))
     );
     assert.deepEqual(unnamed, [], 'controls with no discernible name');
+  } finally {
+    await p.close();
+  }
+});
+
+async function axeViolations(p) {
+  await p.page.addScriptTag({ path: AXE_PATH });
+  return p.page.evaluate(async () => {
+    const baseline = await axe.run(document, { resultTypes: ['violations'] });
+    const enhanced = await axe.run(document, {
+      runOnly: { type: 'tag', values: ['wcag2aaa'] },
+      resultTypes: ['violations'],
+    });
+    const violations = new Map([...baseline.violations, ...enhanced.violations].map((violation) => [violation.id, violation]));
+    return [...violations.values()].map((violation) => ({
+      id: violation.id,
+      impact: violation.impact,
+      help: violation.help,
+      targets: violation.nodes.map((node) => node.target),
+    }));
+  });
+}
+
+test('automated accessibility rules, including available AAA rules, pass in every view', async () => {
+  const p = await planner(TREE);
+  try {
+    assert.deepEqual(await axeViolations(p), [], 'main view violations');
+    for (const panel of PANELS) {
+      await openPanel(p, panel);
+      assert.deepEqual(await axeViolations(p), [], `${panel} panel violations`);
+    }
+  } finally {
+    await p.close();
+  }
+});
+
+test('the narrow single-pane layout passes automated accessibility rules', async () => {
+  const p = await planner(TREE, { viewport: { width: 320, height: 800 } });
+  try {
+    await openPanel(p, 'triage');
+    assert.deepEqual(await axeViolations(p), []);
+  } finally {
+    await p.close();
+  }
+});
+
+test('the document has useful landmarks and a roving keyboard tree', async () => {
+  const p = await planner(TREE);
+  try {
+    assert.equal(await p.page.locator('main').count(), 1);
+    assert.equal(await p.page.getByRole('heading', { level: 1 }).count(), 1);
+    assert.equal(await p.page.getByRole('tree', { name: 'Planned directory tree' }).count(), 1);
+    assert.ok(await p.page.getByRole('treeitem').count());
+    assert.equal(await p.page.locator('[role="treeitem"][tabindex="0"]').count(), 1);
+    assert.equal(await p.page.locator('#sidePane').isVisible(), false);
+    assert.equal(await p.page.locator('#resizer').getAttribute('tabindex'), '-1');
+
+    await p.page.getByRole('button', { name: 'review plan', exact: true }).click();
+    await p.page.waitForSelector('#sidePane:not([hidden])');
+    assert.equal(await p.page.locator('#resizer').getAttribute('tabindex'), '0');
+  } finally {
+    await p.close();
+  }
+});
+
+test('visible controls meet the WCAG 2.2 minimum target size', async () => {
+  const p = await planner(TREE);
+  try {
+    await openPanel(p, 'triage');
+    const tooSmall = await p.page.$$eval('button, input, select, [role="treeitem"]', (controls) =>
+      controls
+        .filter((control) => {
+          const style = getComputedStyle(control);
+          if (style.display === 'none' || style.visibility === 'hidden') return false;
+          const box = control.getBoundingClientRect();
+          return box.width > 0 && box.height > 0 && (box.width < 24 || box.height < 24);
+        })
+        .map((control) => {
+          const box = control.getBoundingClientRect();
+          return {
+            name: control.getAttribute('aria-label') || control.textContent.trim().slice(0, 30),
+            width: Math.round(box.width),
+            height: Math.round(box.height),
+          };
+        })
+    );
+    assert.deepEqual(tooSmall, []);
   } finally {
     await p.close();
   }

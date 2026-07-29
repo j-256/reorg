@@ -10,8 +10,10 @@ import {
   deleteCreated,
   beginRename,
   moveNode,
+  openMoveDialog,
   addNote,
   renderAll,
+  renderDelta,
   cssEsc,
   fmtBytes,
 } from '../app.js';
@@ -26,6 +28,7 @@ let biggest = 1;
 
 export function renderTree() {
   const host = document.getElementById('tree');
+  const focusedId = document.activeElement?.closest?.('[role="treeitem"]')?.dataset.id || null;
   host.replaceChildren();
 
   biggest = 1;
@@ -33,29 +36,61 @@ export function renderTree() {
 
   const matcher = compileFilter(store.ui.filterText);
   for (const child of childrenOf(ROOT_ID)) {
-    const li = renderNode(child, matcher);
+    const li = renderNode(child, matcher, 1);
     if (li) host.appendChild(li);
   }
 
   if (!host.childElementCount) {
-    host.appendChild(el('li', 'note-empty', 'Nothing matches that filter.'));
+    const empty = el('li', 'note-empty', 'Nothing matches that filter.');
+    empty.setAttribute('role', 'treeitem');
+    empty.setAttribute('aria-disabled', 'true');
+    empty.tabIndex = 0;
+    host.appendChild(empty);
+    store.selectedId = null;
+    return;
+  }
+
+  let focusable = store.selectedId
+    ? host.querySelector(`[role="treeitem"][data-id="${cssEsc(store.selectedId)}"]`)
+    : null;
+  if (store.selectedId && !focusable) store.selectedId = null;
+  if (!focusable) focusable = host.querySelector('[role="treeitem"]');
+  if (focusable) focusable.tabIndex = 0;
+
+  if (focusedId) {
+    const replacement = host.querySelector(`[role="treeitem"][data-id="${cssEsc(focusedId)}"]`);
+    if (replacement) requestAnimationFrame(() => replacement.focus({ preventScroll: true }));
   }
 }
 
 /* A filter is a plain substring by default, or a regex when written /like this/.
  * A folder stays visible when anything inside it matches, so filtering never
  * hides the path to a hit. */
+function parsedRegex(text) {
+  const q = (text || '').trim();
+  const match = /^\/(.*)\/([a-z]*)$/.exec(q);
+  if (!match) return null;
+  try {
+    const requested = match[2].replace(/[gy]/g, '');
+    const flags = [...new Set((requested.includes('i') ? requested : requested + 'i').split(''))].join('');
+    return { regex: new RegExp(match[1], flags), error: '' };
+  } catch {
+    return { regex: null, error: 'Invalid regular expression' };
+  }
+}
+
+export function filterError(text) {
+  const parsed = parsedRegex(text);
+  return parsed ? parsed.error : '';
+}
+
 function compileFilter(text) {
   const q = (text || '').trim();
   if (!q) return null;
-  const re = /^\/(.*)\/([a-z]*)$/.exec(q);
-  if (re) {
-    try {
-      const rx = new RegExp(re[1], re[2].includes('i') ? re[2] : re[2] + 'i');
-      return (n) => rx.test(n.cur.name) || rx.test(pathOf(n.id));
-    } catch {
-      return () => true; // mid-typing an invalid regex should not blank the tree
-    }
+  const parsed = parsedRegex(q);
+  if (parsed) {
+    if (parsed.error) return () => true;
+    return (n) => parsed.regex.test(n.cur.name) || parsed.regex.test(pathOf(n.id));
   }
   const lower = q.toLowerCase();
   return (n) => n.cur.name.toLowerCase().includes(lower) || pathOf(n.id).toLowerCase().includes(lower);
@@ -67,11 +102,25 @@ function subtreeMatches(n, matcher) {
   return false;
 }
 
-function renderNode(n, matcher) {
+function accessibleNodeLabel(n) {
+  const facts = [n.cur.name, n.kind === 'dir' ? 'folder' : n.kind === 'link' ? 'symbolic link' : 'file'];
+  if (n.meta) facts.push(n.meta);
+  if (n.collapsedSubtree) facts.push('contents not loaded');
+  const changes = changesOf(n);
+  if (changes.length) facts.push(changes.join(', '));
+  return facts.join(', ');
+}
+
+function renderNode(n, matcher, level) {
   if (matcher && !subtreeMatches(n, matcher)) return null;
 
   const li = el('li');
   li.dataset.id = n.id;
+  li.setAttribute('role', 'treeitem');
+  li.setAttribute('aria-level', String(level));
+  li.setAttribute('aria-selected', String(store.selectedId === n.id));
+  li.setAttribute('aria-label', accessibleNodeLabel(n));
+  li.tabIndex = -1;
 
   const tpl = document.getElementById('tpl-row');
   const row = tpl.content.firstElementChild.cloneNode(true).querySelector('.row');
@@ -88,20 +137,19 @@ function renderNode(n, matcher) {
   const twist = row.querySelector('.twist');
   if (hasKids) {
     twist.textContent = n.collapsed ? TWIST.closed : TWIST.open;
+    twist.setAttribute('aria-label', `${n.collapsed ? 'Expand' : 'Collapse'} ${n.cur.name}`);
+    li.setAttribute('aria-expanded', String(!n.collapsed));
     twist.addEventListener('click', (e) => {
       e.stopPropagation();
       toggleCollapse(n, e.shiftKey || e.altKey);
     });
   } else {
-    twist.classList.add('leaf');
     if (n.collapsedSubtree) {
-      // A summarized dir has real children on disk, just none in the model. Say so,
-      // rather than showing a misleading leaf.
-      twist.classList.remove('leaf');
       twist.textContent = '\u2261';
-      twist.style.cursor = 'default';
-      twist.title = 'not expanded: summarized during the scan (rerun with --all to descend)';
-    }
+      twist.disabled = true;
+      twist.setAttribute('aria-label', `Contents of ${n.cur.name} were not loaded; restart with --all to browse them`);
+      twist.title = 'Contents not loaded during the scan; restart with --all to browse them';
+    } else twist.hidden = true;
   }
 
   const icon = row.querySelector('.icon');
@@ -133,6 +181,11 @@ function renderNode(n, matcher) {
 
   const tagBox = row.querySelector('.tags');
   for (const t of tags) tagBox.appendChild(el('span', 'tag ' + t, t));
+  if (n.collapsedSubtree) {
+    const limited = el('span', 'tag limited', 'contents not loaded');
+    limited.title = 'Restart with --all to browse this directory';
+    tagBox.appendChild(limited);
+  }
   const notes = store.notesFor(n.id);
   if (notes.length) {
     const t = el('span', 'tag note', notes.length === 1 ? 'note' : `notes ${notes.length}`);
@@ -152,13 +205,14 @@ function renderNode(n, matcher) {
     row.appendChild(heat);
   }
 
-  wireRow(row, n);
+  wireRow(row, li, n);
   li.appendChild(row);
 
   if (hasKids && !n.collapsed) {
     const ul = el('ul');
+    ul.setAttribute('role', 'group');
     for (const c of kids) {
-      const child = renderNode(c, matcher);
+      const child = renderNode(c, matcher, level + 1);
       if (child) ul.appendChild(child);
     }
     li.appendChild(ul);
@@ -167,7 +221,16 @@ function renderNode(n, matcher) {
 }
 
 /* ---------------------------------------------------------------- interactions */
-function wireRow(row, n) {
+function wireRow(row, item, n) {
+  item.addEventListener('focus', () => selectTreeNode(n.id));
+  item.addEventListener('keydown', (e) => {
+    if (e.key !== 'ContextMenu' && !(e.shiftKey && e.key === 'F10')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const rect = row.getBoundingClientRect();
+    openRowMenu(row, item, n, rect.left + 24, rect.top + rect.height);
+  });
+
   row.addEventListener('dragstart', (e) => {
     dragId = n.id;
     row.classList.add('dragging');
@@ -213,42 +276,58 @@ function wireRow(row, n) {
 
   row.addEventListener('click', (e) => {
     if (e.target.closest('.twist')) return;
-    for (const r of document.querySelectorAll('.row.sel')) r.classList.remove('sel');
-    row.classList.add('sel');
-    store.selectedId = n.id;
+    selectTreeNode(n.id, { focus: true });
     if (n.kind === 'file') showPreview(n.id);
   });
 
   row.addEventListener('contextmenu', (e) => {
     e.preventDefault();
-    for (const r of document.querySelectorAll('.row.sel')) r.classList.remove('sel');
-    row.classList.add('sel');
-    store.selectedId = n.id;
-
-    const items = [['rename', () => beginRename(n, row.querySelector('.name'))]];
-    if (n.kind === 'file') items.push(['preview first 100 lines', () => showPreview(n.id)]);
-    if (isDir(n)) items.push(['new folder inside', () => addDir(n.id)]);
-    items.push('-', ['add a note', () => addNote(n.id)]);
-    if (n.orig && n.cur.parentId !== ROOT_ID) {
-      items.push(['move to top level', () => moveNode(n.id, ROOT_ID)]);
-    }
-    if (n.orig && (n.cur.parentId !== n.orig.parentId || n.cur.name !== n.orig.name)) {
-      items.push([
-        'undo my changes to this',
-        () => {
-          n.cur = { ...n.orig };
-          markDirty();
-        },
-      ]);
-    }
-    items.push('-');
-    items.push(
-      n.orig
-        ? [n.evicted ? 'keep (un-trash)' : 'mark for trash', () => toggleEvict(n), n.evicted ? '' : 'danger']
-        : ['remove this folder', () => deleteCreated(n), 'danger']
-    );
-    showMenu(e.clientX, e.clientY, items);
+    selectTreeNode(n.id, { focus: true });
+    openRowMenu(row, item, n, e.clientX, e.clientY);
   });
+}
+
+function openRowMenu(row, item, n, x, y) {
+  const items = [
+    ['rename', () => beginRename(n, row.querySelector('.name'))],
+    ['move to another folder\u2026', () => openMoveDialog(n.id)],
+  ];
+  if (n.kind === 'file') items.push(['preview first 100 lines', () => showPreview(n.id)]);
+  if (isDir(n)) items.push(['new folder inside', () => addDir(n.id)]);
+  items.push('-', ['add a note', () => addNote(n.id)]);
+  if (n.orig && (n.cur.parentId !== n.orig.parentId || n.cur.name !== n.orig.name)) {
+    items.push([
+      'undo changes to this entry',
+      () => {
+        n.cur = { ...n.orig };
+        markDirty();
+      },
+    ]);
+  }
+  items.push('-');
+  items.push(
+    n.orig
+      ? [n.evicted ? 'keep this entry' : 'mark for trash', () => toggleEvict(n), n.evicted ? '' : 'danger']
+      : ['remove this planned folder', () => deleteCreated(n), 'danger']
+  );
+  showMenu(x, y, items, item);
+}
+
+export function selectTreeNode(id, { focus = false } = {}) {
+  const item = document.querySelector(`[role="treeitem"][data-id="${cssEsc(id)}"]`);
+  if (!item) return false;
+  for (const candidate of document.querySelectorAll('[role="treeitem"]')) {
+    const selected = candidate === item;
+    candidate.setAttribute('aria-selected', String(selected));
+    candidate.tabIndex = selected ? 0 : -1;
+    const row = candidate.querySelector(':scope > .row');
+    if (row) row.classList.toggle('sel', selected);
+  }
+  store.selectedId = id;
+  renderDelta();
+  if (focus) item.focus({ preventScroll: true });
+  item.scrollIntoView({ block: 'nearest' });
+  return true;
 }
 
 function clearDropMarks() {
@@ -282,6 +361,8 @@ export function revealNode(id) {
   if (box.value) {
     box.value = '';
     store.ui.filterText = '';
+    box.setAttribute('aria-invalid', 'false');
+    document.getElementById('filterStatus').textContent = '';
   }
   renderAll();
   requestAnimationFrame(() => {
@@ -290,12 +371,11 @@ export function revealNode(id) {
       toast('That entry is no longer in the tree.');
       return;
     }
-    row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    row.scrollIntoView({ block: 'center', behavior: reducedMotion ? 'auto' : 'smooth' });
     row.classList.add('flash');
     setTimeout(() => row.classList.remove('flash'), 1200);
-    for (const r of document.querySelectorAll('.row.sel')) r.classList.remove('sel');
-    row.classList.add('sel');
-    store.selectedId = id;
+    selectTreeNode(id, { focus: true });
   });
 }
 

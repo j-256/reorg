@@ -20,7 +20,7 @@ import {
 import { revealNode } from './tree.js';
 import { PLAN_EXPORT_FILENAME } from './plan-file.js';
 
-const MODE = Object.freeze({
+export const MODE = Object.freeze({
   NONE: 'none',
   PREVIEW: 'preview',
   REVIEW: 'review',
@@ -33,23 +33,65 @@ let mode = MODE.NONE;
 let previewId = null;
 let previewData = null;
 let reviewData = null;
+let lastTrigger = null;
 
 const $ = (s) => document.querySelector(s);
 
 function open(newMode, title) {
+  const wasClosed = mode === MODE.NONE;
+  const active = document.activeElement;
+  if (wasClosed || active?.tagName === 'BUTTON') {
+    lastTrigger = active && active !== document.body ? active : null;
+  }
   mode = newMode;
-  $('#stage').classList.add('split');
+  const stage = $('#stage');
+  const side = $('#sidePane');
+  const resizer = $('#resizer');
+  side.hidden = false;
+  stage.classList.add('split');
+  resizer.tabIndex = 0;
+  resizer.setAttribute('aria-hidden', 'false');
   $('#sideTitle').textContent = title;
-  if (!store.ui.sideW) $('#stage').style.setProperty('--side-w', '42%');
+  if (!store.ui.sideW) stage.style.setProperty('--side-w', '42%');
+  syncPanelButtons();
+  if (!lastTrigger || lastTrigger.tagName === 'BUTTON') {
+    requestAnimationFrame(() => $('#sideTitle').focus());
+  }
 }
 
-export function closeSide() {
+export function currentSideMode() {
+  return mode;
+}
+
+function syncPanelButtons() {
+  for (const button of document.querySelectorAll('[data-panel]')) {
+    const active = button.dataset.panel === mode;
+    button.classList.toggle('on', active);
+    button.setAttribute('aria-expanded', String(active));
+  }
+}
+
+export function closeSide({ restoreFocus = true } = {}) {
+  const side = $('#sidePane');
+  const resizer = $('#resizer');
   mode = MODE.NONE;
   previewId = null;
   previewData = null;
   reviewData = null;
   $('#stage').classList.remove('split');
   $('#sideBody').replaceChildren();
+  side.hidden = true;
+  resizer.tabIndex = -1;
+  resizer.setAttribute('aria-hidden', 'true');
+  syncPanelButtons();
+  if (restoreFocus) {
+    const fallback = store.selectedId
+      ? document.querySelector(`[role="treeitem"][data-id="${CSS.escape(store.selectedId)}"]`)
+      : null;
+    const target = lastTrigger && lastTrigger.isConnected ? lastTrigger : fallback;
+    if (target) requestAnimationFrame(() => target.focus({ preventScroll: true }));
+  }
+  lastTrigger = null;
 }
 
 export function renderSide() {
@@ -120,7 +162,10 @@ function renderPreview(body) {
   const addBtn = el('button', 'btn', 'add a note');
   addBtn.addEventListener('click', () => addNote(n.id));
   const revealBtn = el('button', 'btn', 'reveal in tree');
-  revealBtn.addEventListener('click', () => revealNode(n.id));
+  revealBtn.addEventListener('click', () => {
+    closeSide({ restoreFocus: false });
+    revealNode(n.id);
+  });
   const box = el('div', 'note-acts');
   box.append(addBtn, revealBtn);
   acts.appendChild(box);
@@ -152,10 +197,26 @@ function renderPreview(body) {
 
 /* ---------------------------------------------------------------- review */
 export async function showReview(problems, log, applied) {
+  const previous = mode === MODE.REVIEW ? reviewData : null;
   open(MODE.REVIEW, 'review plan');
-  reviewData = { loading: !problems && !log, problems, log, applied };
+  const suppliedResult = problems != null || log != null || applied != null;
+  if (suppliedResult) {
+    reviewData = {
+      loading: false,
+      problems: problems || [],
+      log: log || [],
+      applied,
+      ops: previous && previous.ops ? previous.ops : [],
+      script: previous && previous.script ? previous.script : [],
+      stats: previous && previous.stats ? previous.stats : null,
+      dryRunPassed: !!log && !applied && !(problems && problems.length),
+    };
+    renderSide();
+    return;
+  }
+
+  reviewData = { loading: true };
   renderSide();
-  if (problems || log) return;
 
   try {
     const res = await api.post('/api/resolve', { plan: store.serialize() });
@@ -186,6 +247,13 @@ function renderReview(body) {
     body.appendChild(ok);
   }
 
+  if (d.dryRunPassed) {
+    const ok = el('div', 'ok-note');
+    ok.appendChild(el('div', null, 'Safety check passed. Nothing moved.'));
+    ok.appendChild(el('div', 'note-empty', 'The reviewed actions remain available below.'));
+    body.appendChild(ok);
+  }
+
   const problems = d.problems || [];
   if (problems.length) {
     const sec = el('div', 'side-section');
@@ -195,7 +263,10 @@ function renderReview(body) {
       card.appendChild(el('div', null, p.message || String(p)));
       if (p.id && store.nodes.has(p.id)) {
         const b = el('button', 'btn', 'show me');
-        b.addEventListener('click', () => revealNode(p.id));
+        b.addEventListener('click', () => {
+          closeSide({ restoreFocus: false });
+          revealNode(p.id);
+        });
         card.appendChild(b);
       }
       sec.appendChild(card);
@@ -204,7 +275,7 @@ function renderReview(body) {
   }
 
   const ops = d.ops || [];
-  const lines = d.script || d.log || [];
+  const lines = d.log && d.log.length ? d.log : d.script || [];
   const sec = el('div', 'side-section');
   sec.appendChild(el('h3', null, ops.length || lines.length ? 'operations, in order' : 'nothing to do'));
 
@@ -268,22 +339,30 @@ function renderReview(body) {
     return;
   }
 
-  if (!ops.length || problems.length) return;
+  if (d.applied || !ops.length || problems.length) return;
 
-  // Action row. Dry run is always available; the real apply is gated on the flag
-  // the server was started with, and we say plainly what to do when it is off.
   const actions = el('div', 'side-section');
-  actions.appendChild(el('h3', null, 'apply'));
+  actions.appendChild(el('h3', null, 'safety and apply'));
   const row = el('div', 'note-acts');
 
-  const dry = el('button', 'btn', 'dry run');
-  dry.title = 'Check every path against disk and print what would happen. Changes nothing.';
-  dry.addEventListener('click', () => runApply(true));
+  const dry = el('button', 'btn primary', 'run safety check');
+  dry.title = 'Check every path against disk without moving files';
+  dry.addEventListener('click', async () => {
+    dry.disabled = true;
+    dry.textContent = 'checking\u2026';
+    dry.setAttribute('aria-busy', 'true');
+    await runApply(true);
+    if (dry.isConnected) {
+      dry.disabled = false;
+      dry.textContent = 'run safety check';
+      dry.removeAttribute('aria-busy');
+    }
+  });
   row.appendChild(dry);
 
   if (store.allowApply) {
-    const go = el('button', 'btn danger', `apply ${ops.length} operation(s)`);
-    go.title = 'Move files on disk. An undo script is written first.';
+    const go = el('button', 'btn danger', `apply ${ops.length} operation(s) to disk`);
+    go.title = 'Move files on disk after writing an undo script';
     go.addEventListener('click', () => {
       const t = d.stats && d.stats.trash;
       const msg = [
@@ -295,18 +374,23 @@ function renderReview(body) {
       if (window.confirm(msg)) runApply(false);
     });
     row.appendChild(go);
+  } else {
+    const unavailable = el('button', 'btn', 'apply to disk unavailable');
+    unavailable.disabled = true;
+    unavailable.setAttribute('aria-describedby', 'applyLimit');
+    row.appendChild(unavailable);
   }
   actions.appendChild(row);
 
   if (!store.allowApply) {
-    actions.appendChild(
-      el(
-        'p',
-        'note-empty',
-        'This server can only dry-run. To apply, run  reorg apply --yes  in the terminal, ' +
-          'or restart with  reorg --allow-apply.'
-      )
+    const limit = el(
+      'p',
+      'note-empty',
+      'This browser session is planning-only. Apply the saved plan with  reorg apply --yes  in the terminal, ' +
+        'or restart with  reorg --allow-apply.'
     );
+    limit.id = 'applyLimit';
+    actions.appendChild(limit);
   }
   if (store.undoScripts && store.undoScripts.length) {
     actions.appendChild(
@@ -354,7 +438,10 @@ function renderNotes(body) {
     acts.append(edit, del);
     if (note.target !== '.' && store.nodes.has(note.target)) {
       const rev = el('button', 'btn', 'reveal');
-      rev.addEventListener('click', () => revealNode(note.target));
+      rev.addEventListener('click', () => {
+        closeSide({ restoreFocus: false });
+        revealNode(note.target);
+      });
       acts.appendChild(rev);
     }
     card.appendChild(acts);
@@ -435,13 +522,18 @@ function renderTriage(body) {
 
     const acts = el('div', 'note-acts');
     if (n) {
-      const mark = el('button', 'btn' + (n.evicted ? ' on' : ' danger'), n.evicted ? 'marked' : 'mark for trash');
-      mark.addEventListener('click', () => {
-        toggleEvict(n);
-        renderSide();
-      });
+      const mark = el(
+        'button',
+        'btn' + (n.evicted ? ' on' : ' danger'),
+        n.evicted ? 'restore from trash' : 'mark for trash'
+      );
+      mark.setAttribute('aria-pressed', String(n.evicted));
+      mark.addEventListener('click', () => toggleEvict(n));
       const reveal = el('button', 'btn', 'reveal');
-      reveal.addEventListener('click', () => revealNode(c.id));
+      reveal.addEventListener('click', () => {
+        closeSide({ restoreFocus: false });
+        revealNode(c.id);
+      });
       acts.append(mark, reveal);
     } else {
       acts.appendChild(el('span', 'note-empty', 'no longer in the tree -- rescan'));
@@ -465,16 +557,20 @@ export function showHelp() {
 }
 
 const KEYS = [
+  ['Tab', 'enter the tree; the selected row exposes the same actions in the footer'],
+  ['Enter / Space', 'preview a file, or fold a folder'],
   ['drag a row', "onto a folder's middle to move into it; onto the top or bottom edge to become a sibling"],
   ['drag below the tree', 'move to the top level'],
+  ['m', 'choose a destination folder without dragging'],
   ['double-click / F2 / r', 'rename in place'],
   ['Delete', 'mark for trash (folders take their contents)'],
   ['n', 'new folder inside the selected folder'],
   ['N', 'add a note to the selected entry'],
-  ['Space', 'preview a file, or fold a folder'],
   ['click twist', 'fold; hold Shift or Alt to fold the whole subtree'],
   ['arrow up / down', 'move the selection'],
-  ['arrow left / right', 'fold or unfold'],
+  ['arrow left / right', 'fold, unfold, or move between a folder and its children'],
+  ['Home / End', 'jump to the first or last visible entry'],
+  ['Shift+F10', 'open every action for the selected entry'],
   ['/', 'jump to the filter box'],
   ['Esc', 'close this pane, or clear the selection'],
   ['?', 'this list'],
