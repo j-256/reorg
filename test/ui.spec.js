@@ -74,6 +74,68 @@ test('plan-only scope and unavailable filters are explicit on first load', async
   }
 });
 
+test('new folder is always available and can create at the top level', async () => {
+  const p = await planner(TREE);
+  try {
+    const open = p.page.getByRole('button', { name: 'new folder\u2026', exact: true });
+    assert.equal(await open.count(), 1);
+    await open.click();
+    await p.page.waitForSelector('#createFolderDialog[open]');
+    assert.equal(await p.page.locator('#createFolderParent').inputValue(), '.');
+    await p.page.waitForFunction(() => document.activeElement?.id === 'createFolderName');
+
+    await p.page.locator('#createFolderName').fill('archive');
+    await p.page.getByRole('button', { name: 'Create folder', exact: true }).click();
+    await p.page.waitForSelector('.row[data-id^="new:"]');
+
+    const created = await p.page.evaluate(async () => {
+      const { store } = await import('/lib/store.js');
+      const node = [...store.nodes.values()].find((candidate) => !candidate.orig);
+      return { id: node.id, name: node.cur.name, parentId: node.cur.parentId };
+    });
+    assert.equal(created.name, 'archive');
+    assert.equal(created.parentId, '.');
+    assert.equal(await p.page.locator('[role="treeitem"][aria-selected="true"]').getAttribute('data-id'), created.id);
+    assert.equal(await p.page.evaluate(() => document.activeElement?.dataset.id), created.id);
+    assert.match(await p.page.locator('#toast').textContent(), /nothing was created on disk/i);
+  } finally {
+    await p.close();
+  }
+});
+
+test('new folder defaults to the selected context and validates before planning', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'docs');
+    await p.page.getByRole('button', { name: 'new folder\u2026', exact: true }).click();
+    assert.equal(await p.page.locator('#createFolderParent').inputValue(), 'docs');
+
+    const name = p.page.locator('#createFolderName');
+    const confirm = p.page.getByRole('button', { name: 'Create folder', exact: true });
+    await name.fill('note.md');
+    assert.equal(await confirm.isDisabled(), true);
+    assert.match(await p.page.locator('#createFolderError').textContent(), /already exists/i);
+
+    await name.fill('bad/name');
+    assert.equal(await confirm.isDisabled(), true);
+    assert.match(await p.page.locator('#createFolderError').textContent(), /one folder name/i);
+
+    await name.fill('archive');
+    assert.equal(await confirm.isEnabled(), true);
+    await p.page.keyboard.press('Escape');
+
+    await selectRow(p.page, 'docs/note.md');
+    assert.equal(
+      await p.page.getByRole('button', { name: 'New folder alongside\u2026', exact: true }).count(),
+      1
+    );
+    await p.page.getByRole('button', { name: 'new folder\u2026', exact: true }).click();
+    assert.equal(await p.page.locator('#createFolderParent').inputValue(), 'docs');
+  } finally {
+    await p.close();
+  }
+});
+
 test('directories omitted from the scan disclose that their contents are unavailable', async () => {
   const p = await planner({ 'keep.txt': 'keep', 'node_modules/pkg/index.js': 'module' });
   try {
@@ -114,7 +176,7 @@ test('one folder click exposes plainly labeled selection actions', async () => {
   try {
     await p.page.locator('.row[data-id="docs"]').click();
     assert.match(await p.page.locator('.selection-label').textContent(), /selected:\s*docs/i);
-    for (const name of ['Rename', 'Move\u2026', 'New folder', 'Add note', 'Trash']) {
+    for (const name of ['Rename', 'Move\u2026', 'New folder inside\u2026', 'Add note', 'Trash']) {
       assert.equal(await p.page.getByRole('button', { name, exact: true }).count(), 1, `${name} is available`);
     }
   } finally {
@@ -311,6 +373,10 @@ test('n creates a folder inside the selected directory', async () => {
   try {
     await selectRow(p.page, 'docs');
     await p.page.keyboard.press('n');
+    await p.page.waitForSelector('#createFolderDialog[open]');
+    assert.equal(await p.page.locator('#createFolderParent').inputValue(), 'docs');
+    await p.page.locator('#createFolderName').fill('research');
+    await p.page.keyboard.press('Enter');
     await p.page.waitForSelector('.row[data-id^="new:"]');
 
     const created = await p.page.evaluate(async () => {
@@ -319,7 +385,7 @@ test('n creates a folder inside the selected directory', async () => {
       return { id: n.id, parentId: n.cur.parentId, name: n.cur.name };
     });
     assert.equal(created.parentId, 'docs');
-    assert.equal(created.name, 'new-folder');
+    assert.equal(created.name, 'research');
   } finally {
     await p.close();
   }
@@ -373,6 +439,10 @@ test('Shift+F10 opens a keyboard-operable action menu', async () => {
     await p.page.keyboard.press('Shift+F10');
     await p.page.waitForSelector('[role="menu"]');
     assert.equal(await p.page.evaluate(() => document.activeElement?.getAttribute('role')), 'menuitem');
+    assert.ok(
+      (await p.page.getByRole('menuitem').allTextContents()).some((label) => /new folder inside/i.test(label)),
+      'the context menu repeats folder creation where it is useful'
+    );
     await p.page.keyboard.press('ArrowDown');
     assert.match(await p.page.evaluate(() => document.activeElement?.textContent), /move to another folder/i);
     await p.page.keyboard.press('Escape');
@@ -407,6 +477,51 @@ test('the Move action provides a non-dragging path to reorganize an entry', asyn
 
     assert.equal((await p.node('keep.txt')).parentId, 'docs');
     assert.match(await p.page.locator('#toast').textContent(), /files on disk are unchanged/i);
+  } finally {
+    await p.close();
+  }
+});
+
+test('Move can create a missing destination and select it without leaving the flow', async () => {
+  const p = await planner(TREE);
+  try {
+    await selectRow(p.page, 'keep.txt');
+    await p.page.getByRole('button', { name: 'Move\u2026', exact: true }).click();
+    await p.page.locator('#moveTarget').selectOption('docs');
+    assert.equal(await p.page.locator('#moveCreateLocation').textContent(), 'docs');
+
+    await p.page.locator('#moveCreateName').fill('note.md');
+    assert.equal(await p.page.getByRole('button', { name: 'Create and select', exact: true }).isDisabled(), true);
+    assert.match(await p.page.locator('#moveCreateError').textContent(), /already exists/i);
+
+    await p.page.locator('#moveCreateName').fill('sorted');
+    await p.page.getByRole('button', { name: 'Create and select', exact: true }).click();
+    const firstDestinationId = await p.page.locator('#moveTarget').inputValue();
+    assert.match(firstDestinationId, /^new:/);
+    assert.equal(await p.page.locator('#moveTarget option:checked').textContent(), 'docs/sorted');
+    assert.equal(await p.page.locator('#moveDialog').getAttribute('open'), '');
+
+    await p.page.locator('#moveCreateName').fill('2026');
+    await p.page.getByRole('button', { name: 'Create and select', exact: true }).click();
+    const destinationId = await p.page.locator('#moveTarget').inputValue();
+    assert.match(destinationId, /^new:/);
+    assert.notEqual(destinationId, firstDestinationId);
+    assert.equal(await p.page.locator('#moveTarget option:checked').textContent(), 'docs/sorted/2026');
+
+    await p.page.getByRole('button', { name: 'Move into folder', exact: true }).click();
+    assert.equal((await p.node('keep.txt')).parentId, destinationId);
+    const firstDestination = await p.node(firstDestinationId);
+    const destination = await p.node(destinationId);
+    assert.equal(firstDestination.parentId, 'docs');
+    assert.equal(firstDestination.name, 'sorted');
+    assert.equal(destination.parentId, firstDestinationId);
+    assert.equal(destination.name, '2026');
+
+    const { problems, script } = await p.resolved();
+    assert.deepEqual(problems, []);
+    assert.ok(script.some((line) => /mkdir.*docs\/sorted/.test(line)));
+    assert.ok(script.some((line) => /mkdir.*docs\/sorted\/2026/.test(line)));
+    assert.ok(script.some((line) => /keep\.txt.*docs\/sorted\/2026\/keep\.txt/.test(line)));
   } finally {
     await p.close();
   }

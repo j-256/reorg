@@ -564,7 +564,7 @@ const KEYS = [
   ['m', 'choose a destination folder without dragging'],
   ['double-click / F2 / r', 'rename in place'],
   ['Delete', 'mark for trash (folders take their contents)'],
-  ['n', 'new folder inside the selected folder'],
+  ['n', 'new folder inside a selected folder, or alongside a selected file'],
   ['N', 'add a note to the selected entry'],
   ['click twist', 'fold; hold Shift or Alt to fold the whole subtree'],
   ['arrow up / down', 'move the selection'],

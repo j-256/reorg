@@ -27,6 +27,8 @@ import { toast, el } from './lib/dom.js';
 import { createPlanExport, PLAN_EXPORT_FILENAME } from './lib/plan-file.js';
 
 const $ = (s) => document.querySelector(s);
+const TOP_LEVEL_LABEL = '(top level)';
+const TOP_LEVEL_LOCATION = 'the top level';
 
 let saveTimer = null;
 let saveState = 'clean';
@@ -206,9 +208,12 @@ export function renderDelta() {
     if (name) beginRename(selected, name);
   });
   action('Move\u2026', 'Choose another containing folder', () => openMoveDialog(selected.id));
-  if (isDir(selected)) {
-    action('New folder', 'Create a folder inside the selected folder', () => addDir(selected.id));
-  }
+  const createInside = isDir(selected) && !selected.evicted;
+  action(
+    createInside ? 'New folder inside\u2026' : 'New folder alongside\u2026',
+    createInside ? 'Create a folder inside the selected folder' : 'Create a folder beside the selected entry',
+    () => openCreateFolderDialog(preferredFolderParent(selected.id))
+  );
   action('Add note', 'Attach a note to the selected entry', () => addNote(selected.id));
   if (selected.orig) {
     action(
@@ -242,7 +247,7 @@ function buildToolbar() {
   tb.replaceChildren();
 
   const mk = (label, title, onClick, options = {}) => {
-    const b = el('button', 'btn', label);
+    const b = el('button', `btn${options.primary ? ' primary' : ''}`, label);
     b.title = title;
     if (options.toggleKey) {
       b.dataset.toggle = options.toggleKey;
@@ -263,6 +268,10 @@ function buildToolbar() {
     else show();
   };
 
+  mk('new folder\u2026', 'Create a planned folder at an explicit location', () => openCreateFolderDialog(), {
+    primary: true,
+  });
+  sep();
   mk('collapse all', 'Collapse every loaded folder', () => setAllCollapsed(true));
   mk('expand all', 'Expand every loaded folder', () => setAllCollapsed(false));
   sep();
@@ -376,15 +385,91 @@ export function toggleEvict(n) {
   );
 }
 
-export function addDir(parentId) {
-  const { id } = edit.addDir(parentId);
-  store.selectedId = id;
-  markDirty();
-  requestAnimationFrame(() => {
-    const nameEl = document.querySelector(`.row[data-id="${cssEsc(id)}"] .name`);
-    if (nameEl) beginRename(store.nodes.get(id), nameEl);
+function folderChoices(excludeId = null) {
+  const choices = [{ id: ROOT_ID, label: TOP_LEVEL_LABEL }];
+  for (const candidate of store.nodes.values()) {
+    if (!isDir(candidate) || candidate.evicted || candidate.id === excludeId) continue;
+    if (excludeId && isDescendant(candidate.id, excludeId)) continue;
+    choices.push({ id: candidate.id, label: pathOf(candidate.id) });
+  }
+  choices.sort((a, b) => {
+    if (a.id === ROOT_ID) return -1;
+    if (b.id === ROOT_ID) return 1;
+    return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' });
   });
-  return id;
+  return choices;
+}
+
+function fillFolderSelect(select, choices, selectedId) {
+  select.replaceChildren();
+  for (const choice of choices) {
+    const option = el('option', null, choice.label);
+    option.value = choice.id;
+    select.appendChild(option);
+  }
+  select.value = choices.some((choice) => choice.id === selectedId) ? selectedId : ROOT_ID;
+}
+
+function preferredFolderParent(id = store.selectedId) {
+  const selected = id ? store.nodes.get(id) : null;
+  let candidateId =
+    selected && isDir(selected) && !selected.evicted
+      ? selected.id
+      : selected
+        ? selected.cur.parentId
+        : ROOT_ID;
+  let guard = 0;
+  while (candidateId !== ROOT_ID && guard++ < 128) {
+    const candidate = store.nodes.get(candidateId);
+    if (candidate && isDir(candidate) && !candidate.evicted) return candidate.id;
+    candidateId = candidate ? candidate.cur.parentId : ROOT_ID;
+  }
+  return ROOT_ID;
+}
+
+function folderNameProblem(rawName, parentId) {
+  const name = typeof rawName === 'string' ? rawName.trim() : '';
+  if (!name) return 'Enter a folder name';
+  if (!edit.isValidName(name)) return 'Use one folder name without "/" or the special names "." and ".."';
+  if (childrenOf(parentId).some((candidate) => candidate.cur.name === name)) {
+    return `An entry named "${name}" already exists in this folder`;
+  }
+  return '';
+}
+
+function showFolderNameProblem(input, output, button, parentId, showEmpty = false) {
+  const problem = folderNameProblem(input.value, parentId);
+  const visibleProblem = problem === 'Enter a folder name' && !showEmpty ? '' : problem;
+  input.setAttribute('aria-invalid', String(!!visibleProblem));
+  output.textContent = visibleProblem;
+  button.disabled = !!problem;
+  return problem;
+}
+
+function createPlannedFolder(parentId, rawName, { select = true } = {}) {
+  const name = rawName.trim();
+  const problem = folderNameProblem(name, parentId);
+  if (problem) return { ok: false, problem };
+  const { id } = edit.addDir(parentId, name);
+  if (select) store.selectedId = id;
+  markDirty();
+  toast(`Planned folder: ${pathOf(id)}. Nothing was created on disk.`);
+  return { ok: true, id };
+}
+
+export function openCreateFolderDialog(parentId = preferredFolderParent()) {
+  const dialog = $('#createFolderDialog');
+  const input = $('#createFolderName');
+  const select = $('#createFolderParent');
+  const choices = folderChoices();
+  const resolvedParent = choices.some((choice) => choice.id === parentId)
+    ? parentId
+    : preferredFolderParent(parentId);
+  fillFolderSelect(select, choices, resolvedParent);
+  input.value = '';
+  showFolderNameProblem(input, $('#createFolderError'), $('#createFolderConfirm'), select.value);
+  if (!dialog.open) dialog.showModal();
+  requestAnimationFrame(() => input.focus());
 }
 
 export function deleteCreated(n) {
@@ -462,30 +547,19 @@ export function openMoveDialog(id) {
   if (!n) return;
 
   const dialog = $('#moveDialog');
-  const select = $('#moveTarget');
   moveDialogNodeId = n.id;
   $('#moveName').textContent = pathOf(n.id);
-  select.replaceChildren();
-
-  const choices = [{ id: ROOT_ID, label: '(top level)' }];
-  for (const candidate of store.nodes.values()) {
-    if (!isDir(candidate) || candidate.evicted || candidate.id === n.id) continue;
-    if (isDescendant(candidate.id, n.id)) continue;
-    choices.push({ id: candidate.id, label: pathOf(candidate.id) });
-  }
-  choices.sort((a, b) => {
-    if (a.id === ROOT_ID) return -1;
-    if (b.id === ROOT_ID) return 1;
-    return a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: 'base' });
-  });
-  for (const choice of choices) {
-    const option = el('option', null, choice.label);
-    option.value = choice.id;
-    select.appendChild(option);
-  }
-  select.value = choices.some((choice) => choice.id === n.cur.parentId) ? n.cur.parentId : ROOT_ID;
-  updateMoveConfirmation();
+  populateMoveTargets(n.cur.parentId);
+  $('#moveCreateName').value = '';
+  updateMoveCreateValidation();
   if (!dialog.open) dialog.showModal();
+}
+
+function populateMoveTargets(selectedId) {
+  const n = store.nodes.get(moveDialogNodeId);
+  if (!n) return;
+  fillFolderSelect($('#moveTarget'), folderChoices(n.id), selectedId);
+  updateMoveConfirmation();
 }
 
 function updateMoveConfirmation() {
@@ -500,23 +574,103 @@ function updateMoveConfirmation() {
       : targetId === ROOT_ID
         ? 'Move to top level'
         : 'Move into folder';
+  $('#moveCreateLocation').textContent = targetId === ROOT_ID ? TOP_LEVEL_LOCATION : pathOf(targetId);
+  updateMoveCreateValidation();
 }
 
-function wireMoveDialog() {
+function updateMoveCreateValidation(showEmpty = false) {
+  const input = $('#moveCreateName');
+  return showFolderNameProblem(
+    input,
+    $('#moveCreateError'),
+    $('#moveCreateConfirm'),
+    $('#moveTarget').value,
+    showEmpty
+  );
+}
+
+function createMoveDestination() {
+  const input = $('#moveCreateName');
+  const parentId = $('#moveTarget').value;
+  const problem = updateMoveCreateValidation(true);
+  if (problem) {
+    input.focus();
+    return;
+  }
+  const created = createPlannedFolder(parentId, input.value, { select: false });
+  if (!created.ok) {
+    $('#moveCreateError').textContent = created.problem;
+    return;
+  }
+  input.value = '';
+  populateMoveTargets(created.id);
+  input.focus();
+}
+
+function wireFolderDialogs() {
+  const createDialog = $('#createFolderDialog');
+  const createInput = $('#createFolderName');
+  const createParent = $('#createFolderParent');
+  const createConfirm = $('#createFolderConfirm');
+  const updateCreateValidation = (showEmpty = false) =>
+    showFolderNameProblem(
+      createInput,
+      $('#createFolderError'),
+      createConfirm,
+      createParent.value,
+      showEmpty
+    );
+
+  createInput.addEventListener('input', () => updateCreateValidation());
+  createInput.addEventListener('blur', () => updateCreateValidation(true));
+  createParent.addEventListener('change', () => updateCreateValidation());
+  $('#createFolderCancel').addEventListener('click', () => createDialog.close('cancel'));
+  $('#createFolderForm').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const problem = updateCreateValidation(true);
+    if (problem) {
+      createInput.focus();
+      return;
+    }
+    const created = createPlannedFolder(createParent.value, createInput.value);
+    if (!created.ok) {
+      $('#createFolderError').textContent = created.problem;
+      createInput.focus();
+      return;
+    }
+    createDialog.close('created');
+    requestAnimationFrame(() => selectTreeNode(created.id, { focus: true }));
+  });
+
   const dialog = $('#moveDialog');
   const select = $('#moveTarget');
   select.addEventListener('change', updateMoveConfirmation);
-  $('#moveConfirm').addEventListener('click', () => {
+  const moveCreateInput = $('#moveCreateName');
+  moveCreateInput.addEventListener('input', () => updateMoveCreateValidation());
+  moveCreateInput.addEventListener('blur', () => updateMoveCreateValidation(true));
+  moveCreateInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Enter') return;
+    event.preventDefault();
+    createMoveDestination();
+  });
+  $('#moveCreateConfirm').addEventListener('click', createMoveDestination);
+  $('#moveCancel').addEventListener('click', () => dialog.close('cancel'));
+  $('#moveForm').addEventListener('submit', (event) => {
+    event.preventDefault();
     const id = moveDialogNodeId;
     const targetId = select.value;
     const n = store.nodes.get(id);
     if (!n || targetId === n.cur.parentId) return;
-    dialog.close();
+    dialog.close('moved');
     moveNode(id, targetId);
     requestAnimationFrame(() => selectTreeNode(id, { focus: true }));
   });
   dialog.addEventListener('close', () => {
+    const returnId = moveDialogNodeId;
     moveDialogNodeId = null;
+    if (returnId && store.nodes.has(returnId)) {
+      requestAnimationFrame(() => selectTreeNode(returnId, { focus: true }));
+    }
   });
 }
 
@@ -679,9 +833,9 @@ function wireKeyboard() {
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       n.orig ? toggleEvict(n) : deleteCreated(n);
-    } else if (e.key === 'n' && isDir(n)) {
+    } else if (e.key === 'n') {
       e.preventDefault();
-      addDir(n.id);
+      openCreateFolderDialog(preferredFolderParent(n.id));
     } else if (e.key === 'N') {
       e.preventDefault();
       addNote(n.id);
@@ -880,7 +1034,7 @@ async function boot() {
   wireKeyboard();
   wireFilter();
   wireResizer();
-  wireMoveDialog();
+  wireFolderDialogs();
   renderAll();
 
   if (data.scan.truncated) {

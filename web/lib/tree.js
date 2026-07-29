@@ -6,7 +6,7 @@ import {
   markDirty,
   toggleCollapse,
   toggleEvict,
-  addDir,
+  openCreateFolderDialog,
   deleteCreated,
   beginRename,
   moveNode,
@@ -293,7 +293,10 @@ function openRowMenu(row, item, n, x, y) {
     ['move to another folder\u2026', () => openMoveDialog(n.id)],
   ];
   if (n.kind === 'file') items.push(['preview first 100 lines', () => showPreview(n.id)]);
-  if (isDir(n)) items.push(['new folder inside', () => addDir(n.id)]);
+  items.push([
+    isDir(n) && !n.evicted ? 'new folder inside\u2026' : 'new folder alongside\u2026',
+    () => openCreateFolderDialog(isDir(n) && !n.evicted ? n.id : n.cur.parentId),
+  ]);
   items.push('-', ['add a note', () => addNote(n.id)]);
   if (n.orig && (n.cur.parentId !== n.orig.parentId || n.cur.name !== n.orig.name)) {
     items.push([

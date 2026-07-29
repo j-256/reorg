@@ -50,16 +50,50 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<dialog class="move-dialog" id="moveDialog" aria-labelledby="moveTitle" aria-describedby="moveHelp">
-  <form method="dialog">
+<dialog class="planner-dialog" id="createFolderDialog" aria-labelledby="createFolderTitle" aria-describedby="createFolderHelp">
+  <form id="createFolderForm" method="dialog" novalidate>
+    <h2 id="createFolderTitle">New folder</h2>
+    <p class="dialog-intro">Name the folder and choose exactly where it belongs</p>
+    <div class="dialog-field">
+      <label for="createFolderName">Folder name</label>
+      <input id="createFolderName" type="text" autocomplete="off" required aria-describedby="createFolderError">
+      <p class="field-error" id="createFolderError" role="status" aria-live="polite"></p>
+    </div>
+    <div class="dialog-field">
+      <label for="createFolderParent">Containing folder</label>
+      <select id="createFolderParent"></select>
+    </div>
+    <p class="note-empty" id="createFolderHelp">This adds a folder to the saved plan. Nothing is created on disk until the plan is applied.</p>
+    <div class="dialog-actions">
+      <button class="btn" id="createFolderCancel" type="button">Cancel</button>
+      <button class="btn primary" id="createFolderConfirm" type="submit">Create folder</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="planner-dialog" id="moveDialog" aria-labelledby="moveTitle" aria-describedby="moveHelp">
+  <form id="moveForm" method="dialog">
     <h2 id="moveTitle">Move entry</h2>
     <p class="dialog-intro">Choose the folder that should contain <strong id="moveName"></strong></p>
-    <label for="moveTarget">Destination folder</label>
-    <select id="moveTarget"></select>
+    <div class="dialog-field">
+      <label for="moveTarget">Destination folder</label>
+      <select id="moveTarget"></select>
+    </div>
+    <fieldset class="dialog-create">
+      <legend>Need a new destination?</legend>
+      <p>Create it inside <strong id="moveCreateLocation"></strong>, then keep moving</p>
+      <label for="moveCreateName">New folder name</label>
+      <div class="dialog-inline">
+        <input id="moveCreateName" type="text" autocomplete="off" aria-describedby="moveCreateError moveCreateNotice">
+        <button class="btn" id="moveCreateConfirm" type="button">Create and select</button>
+      </div>
+      <p class="field-error" id="moveCreateError" role="status" aria-live="polite"></p>
+      <p class="note-empty" id="moveCreateNotice">The new folder is added to the plan immediately, even if you later cancel this move.</p>
+    </fieldset>
     <p class="note-empty" id="moveHelp">This changes the saved plan only. Files stay on disk until the plan is applied. Sibling order remains folders first, then alphabetical.</p>
     <div class="dialog-actions">
-      <button class="btn" type="submit" value="cancel">Cancel</button>
-      <button class="btn primary" id="moveConfirm" type="button">Move</button>
+      <button class="btn" id="moveCancel" type="button">Cancel</button>
+      <button class="btn primary" id="moveConfirm" type="submit">Move</button>
     </div>
   </form>
 </dialog>

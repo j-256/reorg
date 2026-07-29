@@ -53,6 +53,11 @@ test('the self-contained page plans, previews, reviews, and exports without a se
     });
     assert.match(applyError, /cannot check or write to disk/i);
 
+    await page.getByRole('button', { name: 'new folder\u2026', exact: true }).click();
+    await page.locator('#createFolderName').fill('archive');
+    await page.getByRole('button', { name: 'Create folder', exact: true }).click();
+    assert.equal(await page.locator('.row[data-id^="new:"] .name').textContent(), 'archive');
+
     await page.locator('.row[data-id="notes.md"]').click();
     await page.waitForSelector('pre.head');
     assert.match(await page.locator('pre.head').textContent(), /first line/);
@@ -81,6 +86,10 @@ test('the self-contained page plans, previews, reviews, and exports without a se
     assert.deepEqual(
       payload.plan.overrides.find((item) => item.id === 'keep.txt').cur,
       { name: 'renamed.txt', parentId: '.' }
+    );
+    assert.deepEqual(
+      payload.plan.created.find((item) => item.cur.name === 'archive').cur,
+      { name: 'archive', parentId: '.' }
     );
     assert.equal(await page.locator('#saveState').textContent(), 'plan exported');
     assert.deepEqual(errors, []);

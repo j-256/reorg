@@ -62,7 +62,8 @@ const SWEEP = `(() => {
   const fails = [];
   const seen = new Set();
   let checked = 0;
-  for (const el of document.querySelectorAll('*')) {
+  const auditRoot = document.querySelector('dialog[open]') || document;
+  for (const el of auditRoot.querySelectorAll('*')) {
     const own = [...el.childNodes].filter((n) => n.nodeType === 3 && n.textContent.trim()).map((n) => n.textContent.trim()).join(' ');
     if (!own) continue;
     const cs = getComputedStyle(el);
@@ -114,6 +115,25 @@ async function openPanel(p, name) {
   await p.page.waitForTimeout(200);
 }
 
+async function openDialog(p, name) {
+  if (name === 'create folder') {
+    await p.page.getByRole('button', { name: 'new folder\u2026', exact: true }).click();
+    await p.page.waitForSelector('#createFolderDialog[open]');
+    return;
+  }
+  await p.page.evaluate(async () => {
+    const app = await import('/app.js');
+    app.openMoveDialog('keep.txt');
+  });
+  await p.page.waitForSelector('#moveDialog[open]');
+}
+
+async function closeDialog(p, name) {
+  await p.page.keyboard.press('Escape');
+  const id = name === 'create folder' ? 'createFolderDialog' : 'moveDialog';
+  await p.page.waitForFunction((dialogId) => !document.getElementById(dialogId)?.open, id);
+}
+
 for (const scheme of ['dark', 'light']) {
   test(`${scheme} theme: the main view meets WCAG AAA enhanced contrast`, async () => {
     const p = await planner(TREE, { colorScheme: scheme });
@@ -127,7 +147,7 @@ for (const scheme of ['dark', 'light']) {
     }
   });
 
-  test(`${scheme} theme: every side panel meets WCAG AAA enhanced contrast`, async () => {
+  test(`${scheme} theme: every side panel and dialog meets WCAG AAA enhanced contrast`, async () => {
     const p = await planner(TREE, { colorScheme: scheme });
     try {
       await populate(p);
@@ -135,6 +155,13 @@ for (const scheme of ['dark', 'light']) {
         await openPanel(p, panel);
         const { fails } = await p.page.evaluate(SWEEP);
         assert.deepEqual(fails, [], `contrast failures in ${scheme}/${panel}:\n${JSON.stringify(fails, null, 2)}`);
+      }
+      await p.page.evaluate(async () => (await import('/lib/side.js')).closeSide({ restoreFocus: false }));
+      for (const dialog of ['create folder', 'move']) {
+        await openDialog(p, dialog);
+        const { fails } = await p.page.evaluate(SWEEP);
+        assert.deepEqual(fails, [], `contrast failures in ${scheme}/${dialog}:\n${JSON.stringify(fails, null, 2)}`);
+        await closeDialog(p, dialog);
       }
     } finally {
       await p.close();
@@ -192,7 +219,7 @@ test('every actionable control has an accessible name', async () => {
           const cs = getComputedStyle(e);
           if (cs.display === 'none' || cs.visibility === 'hidden') return false;
           const name = (e.getAttribute('aria-label') || e.title || e.textContent || e.getAttribute('placeholder') || '').trim();
-          return !name;
+          return !name && !(e.labels && e.labels.length);
         })
         .map((e) => e.outerHTML.slice(0, 80))
     );
@@ -228,6 +255,12 @@ test('automated accessibility rules, including available AAA rules, pass in ever
       await openPanel(p, panel);
       assert.deepEqual(await axeViolations(p), [], `${panel} panel violations`);
     }
+    await p.page.evaluate(async () => (await import('/lib/side.js')).closeSide({ restoreFocus: false }));
+    for (const dialog of ['create folder', 'move']) {
+      await openDialog(p, dialog);
+      assert.deepEqual(await axeViolations(p), [], `${dialog} dialog violations`);
+      await closeDialog(p, dialog);
+    }
   } finally {
     await p.close();
   }
@@ -238,6 +271,9 @@ test('the narrow single-pane layout passes automated accessibility rules', async
   try {
     await openPanel(p, 'triage');
     assert.deepEqual(await axeViolations(p), []);
+    await p.page.evaluate(async () => (await import('/lib/side.js')).closeSide({ restoreFocus: false }));
+    await openDialog(p, 'move');
+    assert.deepEqual(await axeViolations(p), [], 'narrow move dialog violations');
   } finally {
     await p.close();
   }
