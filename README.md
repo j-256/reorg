@@ -1,6 +1,6 @@
 # reorg
 
-Reorganize a messy directory by dragging it into shape, then apply the plan with one command – and an undo script.
+Reorganize a messy directory by dragging it into shape, then apply the plan with one command. Before moving anything, reorg writes an undo script.
 
 ```
 npx reorg-cli ~/Downloads

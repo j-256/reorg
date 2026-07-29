@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// reorg -- plan a directory reorganization in the browser, apply it with an undo script.
+// reorg -- plan directory reorganizations in the browser, then apply or undo them from the CLI
 
 import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
 import { join, resolve as resolvePath } from 'node:path';
