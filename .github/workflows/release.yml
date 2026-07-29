@@ -182,39 +182,14 @@ jobs:
         id: publish # the release step below keys off this step's conclusion
         run: npm publish --provenance --access public
 
-      # Distinguishes "we uploaded a tarball" from "a user can install it",
-      # which the packed-install check above cannot speak to since it never
-      # touches the registry. Cannot gate anything -- the publish above is
-      # irreversible -- so it is an alarm, not a check. A freshly published
-      # version is not instantly resolvable, hence the retries.
+      # Distinguishes "we uploaded a tarball" from "a user can install it"
+      # The packed-install check cannot speak to this because it never touches
+      # the registry, and the publish above is irreversible, so this is an alarm
+      # rather than a gate
+      # A dry run exercises the same helper against the existing package version
+      # while unit tests simulate delayed registry availability
       - name: Smoke test the published package
-        if: ${{ !inputs.dry_run }}
-        run: |
-          set -euo pipefail
-          version="$(node -p 'require("./package.json").version')"
-          work="$(mktemp -d)"
-          cd "$work"
-          npm init -y >/dev/null 2>&1
-          attempts=5
-          for attempt in $(seq "$attempts"); do
-            # Keep npm's output: a 404 means propagation lag and retrying is
-            # right, while E401/EPERM/a corrupt tarball mean it never will
-            # resolve. Silencing this leaves both looking identical in the log,
-            # and telling a human what happened is this step's only job.
-            if npm install --no-audit --no-fund "reorg-cli@$version" > install.log 2>&1; then
-              ./node_modules/.bin/reorg --help | head -1
-              echo "Installed reorg-cli@$version from the registry on attempt $attempt"
-              exit 0
-            fi
-            echo "Not resolvable yet (attempt $attempt):"
-            tail -5 install.log
-            # No sleep after the last attempt -- it would burn 50s before failing
-            [ "$attempt" -eq "$attempts" ] && break
-            sleep $((attempt * 10))
-          done
-          echo "Error: reorg-cli@$version did not become installable from the registry"
-          echo "The package IS published -- this step cannot and does not undo that."
-          exit 1
+        run: node scripts/smoke-published.mjs
 
       # Runs even if the smoke test failed, because the publish above is
       # irreversible: once a version is on the registry, a flaky smoke test must
