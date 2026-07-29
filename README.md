@@ -219,7 +219,7 @@ npm test
 npm version patch   # or minor, major
 ```
 
-That runs a guard (on `main`, in sync with `origin/main`), runs the dependency-free suite, bumps the version, commits, tags, and pushes. The tag push is what triggers the release: CI re-checks that the tag sits on `main` and matches `package.json`, re-runs the tests and the packed-install check, publishes to npm with a provenance attestation, installs the result from the registry to confirm it is really there, and opens a GitHub release with the tarball attached.
+That runs a guard (on `main`, in sync with `origin/main`), runs the dependency-free suite, bumps the version, commits, tags, and pushes. The tag push is what triggers the release: CI re-checks that the tag sits on `main` and matches `package.json`, runs the browser suite as a formal publishing prerequisite, re-runs the dependency-free suite and packed-install check, publishes to npm with a provenance attestation, installs the result from the registry to confirm it is really there, and opens a GitHub release with the tarball attached.
 
 To exercise the pipeline without publishing, dispatch it manually – `dry_run` defaults to true:
 

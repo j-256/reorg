@@ -26,7 +26,37 @@ permissions:
   id-token: write # authenticate to npm, and sign the provenance attestation
 
 jobs:
+  # The atomic main-and-tag push starts CI and this workflow together, so the
+  # release must prove browser behavior on the tagged tree for itself
+  # Keep this job here because npm trusted publishing pins release.yml directly
+  browser:
+    runs-on: ubuntu-latest
+    name: browser tests (release prerequisite)
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Configure git identity for the sandbox repos
+        run: |
+          git config --global user.email ci@example.com
+          git config --global user.name CI
+          git config --global init.defaultBranch main
+
+      - name: Run browser tests
+        run: npm run test:ui
+
   release:
+    needs: browser
     runs-on: ubuntu-latest
     # Load-bearing for authentication, not deployment bookkeeping: npm's trusted
     # publisher for this package specifies environment `prd`, and GitHub only
