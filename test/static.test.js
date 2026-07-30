@@ -15,6 +15,9 @@ import {
 import { sandbox, cleanup } from './helpers.js';
 
 const CLI = new URL('../bin/reorg', import.meta.url);
+const PACKAGE_VERSION = JSON.parse(
+  readFileSync(new URL('../package.json', import.meta.url), 'utf8')
+).version;
 
 function runCli(args, options = {}) {
   return spawnSync(process.execPath, [CLI.pathname, ...args], {
@@ -22,6 +25,24 @@ function runCli(args, options = {}) {
     ...options,
   });
 }
+
+test('--version and -v report the package version', () => {
+  for (const flag of ['--version', '-v']) {
+    const result = runCli([flag]);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(result.stdout.trim(), `reorg ${PACKAGE_VERSION}`);
+    assert.equal(result.stderr, '');
+  }
+});
+
+test('--help includes the package version in its header', () => {
+  const result = runCli(['--help']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(
+    result.stdout.split(/\r?\n/, 1)[0],
+    `reorg ${PACKAGE_VERSION} -- plan a directory reorganization, then apply it safely.`
+  );
+});
 
 test('the static planner inlines its assets and scan data', () => {
   const root = sandbox({

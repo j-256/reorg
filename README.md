@@ -65,8 +65,9 @@ npm ci && npx playwright install chromium
 | `reorg status [dir]` | what is planned, applied, and undoable |
 | `reorg summarize [dir]` | one-line AI description per file (see below) |
 | `reorg triage [dir]` | rank likely-disposable entries and say why |
+| `reorg --version` | print the installed reorg version |
 
-Short aliases are `-s` for `--static`, `-o` for `--output`, `-p` for `--port`, `-y` for `--yes`, and `-h` for `--help`. `--plan` stays long-only so `-p` is unambiguously the port.
+Short aliases are `-s` for `--static`, `-o` for `--output`, `-p` for `--port`, `-y` for `--yes`, `-v` for `--version`, and `-h` for `--help`. `--plan` stays long-only so `-p` is unambiguously the port.
 
 In the planner:
 

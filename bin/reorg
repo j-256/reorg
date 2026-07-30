@@ -16,7 +16,9 @@ import { analyze, ranked } from '../src/signals.js';
 import { writeStaticPlanner } from '../src/static.js';
 import { parsePlanExport } from '../web/lib/plan-file.js';
 
-const HELP = `reorg -- plan a directory reorganization, then apply it safely.
+const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
+const HELP = `reorg ${VERSION} -- plan a directory reorganization, then apply it safely.
 
 USAGE
   reorg [dir]                    scan dir (default .), serve the planner, open a browser
@@ -49,6 +51,7 @@ OPTIONS
   --model ID         with 'summarize': model to call (default ${DEFAULT_MODEL})
   --force            with 'summarize': re-summarize files that already have one
   --limit N          with 'triage': show at most N candidates (default 30)
+  -v, --version      show version and exit
   -h, --help         this text
 
 SUMMARIES
@@ -88,6 +91,7 @@ function parseArgs(argv) {
       return next;
     };
     if (a === '-h' || a === '--help') opts.help = true;
+    else if (a === '-v' || a === '--version') opts.version = true;
     else if (a === '--no-open') opts.open = false;
     else if (a === '--static' || a === '-s') opts.static = true;
     else if (a === '--allow-apply') opts.allowApply = true;
@@ -218,6 +222,10 @@ function loadResolved(root, opts, imported = null) {
 async function main() {
   const argv = process.argv.slice(2);
   const opts = parseArgs(argv);
+  if (opts.version) {
+    console.log(`reorg ${VERSION}`);
+    return;
+  }
   if (opts.help) {
     console.log(HELP);
     return;
