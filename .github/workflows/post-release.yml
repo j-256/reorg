@@ -1,0 +1,173 @@
+name: Post-release verification
+
+# A successful tag-triggered publish starts this workflow automatically
+# Manual dispatch supports safe verification and recovery without republishing
+
+on:
+  workflow_run:
+    workflows: [Publish npm package]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Publish workflow run containing the release package
+        required: true
+        type: string
+      tag:
+        description: Published tag to verify
+        required: true
+        type: string
+      create_release:
+        description: Create or update the GitHub release
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  EXPECTED_PACKAGE_NAME: reorg-cli
+  RELEASE_ARTIFACT_NAME: release-package
+
+jobs:
+  artifact:
+    name: Verify release artifact
+    if: >-
+      ${{
+        github.event_name == 'workflow_dispatch' ||
+        (
+          github.event.workflow_run.conclusion == 'success' &&
+          github.event.workflow_run.event == 'push' &&
+          startsWith(github.event.workflow_run.head_branch, 'v')
+        )
+      }}
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_branch || inputs.tag }}
+      SOURCE_RUN_ID: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.id || inputs.source_run_id }}
+    outputs:
+      package_spec: ${{ steps.package.outputs.package_spec }}
+      release_tag: ${{ steps.package.outputs.release_tag }}
+      source_run_id: ${{ steps.package.outputs.source_run_id }}
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Download the published package
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.RELEASE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/release-package
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify the release artifact
+        id: package
+        run: |
+          set -euo pipefail
+          set -- "$RUNNER_TEMP"/release-package/*.tgz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "Error: expected exactly one release package"
+            exit 1
+          fi
+          tgz="$1"
+          metadata="$(tar -xOf "$tgz" package/package.json)"
+          package_name="$(printf '%s' "$metadata" | node -e 'let data = ""; process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(data).name))')"
+          package_version="$(printf '%s' "$metadata" | node -e 'let data = ""; process.stdin.on("data", chunk => data += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(data).version))')"
+          if [ "$package_name" != "$EXPECTED_PACKAGE_NAME" ]; then
+            echo "Error: expected package $EXPECTED_PACKAGE_NAME, found $package_name"
+            exit 1
+          fi
+          if [ "v$package_version" != "$RELEASE_TAG" ]; then
+            echo "Error: tag $RELEASE_TAG does not match artifact version v$package_version"
+            exit 1
+          fi
+          {
+            echo "package_spec=$package_name@$package_version"
+            echo "release_tag=$RELEASE_TAG"
+            echo "source_run_id=$SOURCE_RUN_ID"
+          } >> "$GITHUB_OUTPUT"
+
+  smoke:
+    name: Install published package from npm
+    needs: artifact
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # workflow_run executes the workflow from the default branch
+      # Keep that trusted checkout rather than executing code from the triggering ref
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Install the published package from npm
+        env:
+          PACKAGE_SPEC: ${{ needs.artifact.outputs.package_spec }}
+        run: |
+          node --input-type=module -e \
+            "import { smokePublished } from './scripts/smoke-published.mjs'; await smokePublished({ packageSpec: process.env.PACKAGE_SPEC })"
+
+  release:
+    name: Create or update GitHub release
+    needs: artifact
+    if: >-
+      ${{
+        !cancelled() &&
+        needs.artifact.result == 'success' &&
+        (github.event_name == 'workflow_run' || inputs.create_release)
+      }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.artifact.outputs.release_tag }}
+      SOURCE_RUN_ID: ${{ needs.artifact.outputs.source_run_id }}
+    steps:
+      - name: Download the release package
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.RELEASE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/release-package
+          run-id: ${{ env.SOURCE_RUN_ID }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # This job is independent of registry smoke so slow propagation does not
+      # leave a published package without its GitHub metadata
+      - name: Create or update the GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          set -- "$RUNNER_TEMP"/release-package/*.tgz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "Error: expected exactly one release package"
+            exit 1
+          fi
+          artifact_tarball="$1"
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            asset_name="$(basename "$artifact_tarball")"
+            asset_names="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+            if printf '%s\n' "$asset_names" | grep -Fx "$asset_name" >/dev/null; then
+              existing_dir="$RUNNER_TEMP/existing-release"
+              mkdir -p "$existing_dir"
+              gh release download "$RELEASE_TAG" --pattern "$asset_name" --dir "$existing_dir"
+              if ! cmp -s "$artifact_tarball" "$existing_dir/$asset_name"; then
+                echo "Error: GitHub release contains a different $asset_name"
+                exit 1
+              fi
+              echo "GitHub release already contains the verified package"
+            else
+              gh release upload "$RELEASE_TAG" "$artifact_tarball"
+            fi
+          else
+            gh release create "$RELEASE_TAG" "$artifact_tarball" --title "$RELEASE_TAG" --generate-notes --verify-tag
+          fi

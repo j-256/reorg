@@ -1,15 +1,16 @@
-name: Release
+name: Publish npm package
 
 # Triggers:
-#   - push a v* tag      -> validate, test, publish, release
-#   - workflow_dispatch  -> the same pipeline, dry run by default
+#   - push a v* tag      -> validate, package, and publish
+#   - workflow_dispatch  -> validate and package, dry run by default
 #
 # Releases are cut with `npm version patch` on main, which tags and pushes; that
-# tag push is what lands here. ci.yml stays a pure test gate and knows nothing
-# about publishing.
+# tag push is what lands here. Post-release verification and GitHub release
+# metadata live in post-release.yml so they cannot turn a successful npm publish
+# red after the irreversible write
 #
 # The filename is load-bearing: npm pins the trusted publisher to one exact
-# workflow filename, so renaming this file breaks authentication.
+# workflow filename, so renaming this file breaks authentication
 
 on:
   push:
@@ -22,8 +23,10 @@ on:
         default: true
 
 permissions:
-  contents: write # create the GitHub release
-  id-token: write # authenticate to npm, and sign the provenance attestation
+  contents: read
+
+env:
+  RELEASE_ARTIFACT_NAME: release-package
 
 jobs:
   # The atomic main-and-tag push starts CI and this workflow together, so the
@@ -55,17 +58,9 @@ jobs:
       - name: Run browser tests
         run: npm run test:ui
 
-  release:
-    needs: browser
+  package:
+    name: Validate release package
     runs-on: ubuntu-latest
-    # Load-bearing for authentication, not deployment bookkeeping: npm's trusted
-    # publisher for this package specifies environment `prd`, and GitHub only
-    # puts an `environment` claim in the OIDC token when the job declares one.
-    # Without this the claim is absent, npm finds no matching publisher, and the
-    # exchange fails with "package not found" -- after which the publish runs
-    # unauthenticated and the registry answers E404. Renaming this, or the
-    # environment on npmjs.com, breaks publishing until both agree.
-    environment: prd
     steps:
       - uses: actions/checkout@v6
         with:
@@ -73,13 +68,13 @@ jobs:
 
       # A tag pointing at a commit that never reached main would publish code
       # nobody reviewed on main. Only meaningful for tag pushes: a manual dry
-      # run from a branch has no tag to check.
+      # run from a branch has no tag to check
       #
       # Ask git the question directly rather than grepping `branch -r --contains`
       # output: the substring 'origin/main' also matches 'origin/maintenance',
       # so a commit pushed only to a branch whose name starts with main would
       # pass a grep. --is-ancestor exits 0 when reachable, 1 when not, and 128
-      # on a bad ref, so `if !` fails closed on errors too.
+      # on a bad ref, so `if !` fails closed on errors too
       - name: Verify the tag is on main
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
@@ -91,10 +86,6 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-          # Pins the registry the publish talks to, which is also the registry
-          # npm exchanges the OIDC token against. Without it the publish targets
-          # whatever default is configured and trusted publishing does not apply.
-          registry-url: https://registry.npmjs.org
 
       - name: Verify the tag matches package.json version
         if: startsWith(github.ref, 'refs/tags/v')
@@ -109,7 +100,7 @@ jobs:
       # reason: the suite shells out to git and needs an identity configured
       # rather than merely present. The tests happen to self-configure today, so
       # this is insurance against the first one that does not -- which would
-      # otherwise fail here, mid-release, while ci.yml stayed green.
+      # otherwise fail here, mid-release, while ci.yml stayed green
       - name: Configure git identity for the sandbox repos
         run: |
           git config --global user.email ci@example.com
@@ -118,7 +109,7 @@ jobs:
 
       # A tag can point at a commit ci.yml never ran on, so re-run the gate
       # rather than trusting a green tick elsewhere. One leg, not the matrix:
-      # this suite needs nothing installed.
+      # this suite needs nothing installed
       - name: Run tests
         run: npm test
 
@@ -127,7 +118,12 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts
           npm pack --pack-destination artifacts
-          tgz="$(ls artifacts/*.tgz)"
+          set -- artifacts/*.tgz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "Error: expected exactly one package tarball"
+            exit 1
+          fi
+          tgz="$1"
           {
             printf '\n**Tarball contents**\n\n'
             echo '```'
@@ -139,67 +135,86 @@ jobs:
       # file installs broken while every unit test passes. Mirrors ci.yml's
       # package job -- duplicated on purpose, since Actions has no include for
       # step bodies and workflow_call is what npm flags as breaking OIDC
-      # trusted-publisher validation.
+      # trusted-publisher validation
       - name: Verify the packed CLI runs from a clean install
         run: |
           set -euo pipefail
-          tgz="$(ls "$PWD"/artifacts/*.tgz)"
+          set -- "$PWD"/artifacts/*.tgz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "Error: expected exactly one package tarball"
+            exit 1
+          fi
+          tgz="$1"
           work="$(mktemp -d)"
           cd "$work"
           npm init -y >/dev/null 2>&1
           npm install --no-audit --no-fund "$tgz" >/dev/null 2>&1
           # The package name and the installed command differ on purpose, so
-          # assert on the binary rather than assuming they match.
+          # assert on the binary rather than assuming they match
           ./node_modules/.bin/reorg --help | head -1
           mkdir -p sample/old-backup && echo hi > sample/keep.txt
           ./node_modules/.bin/reorg triage sample
-          # Dry run must be the default: this must not move anything.
+          # Dry run must be the default: this must not move anything
           ./node_modules/.bin/reorg apply sample
           test -f sample/keep.txt
 
+      - name: Preserve the verified package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.RELEASE_ARTIFACT_NAME }}
+          path: artifacts/*.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Publish verified package
+    needs: [browser, package]
+    if: ${{ !inputs.dry_run && startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+    # Load-bearing for authentication, not deployment bookkeeping: npm's trusted
+    # publisher for this package specifies environment `prd`, and GitHub only
+    # puts an `environment` claim in the OIDC token when the job declares one
+    # Without this the claim is absent, npm finds no matching publisher, and the
+    # exchange fails with "package not found" after which the publish runs
+    # unauthenticated and the registry answers E404
+    environment: prd
+    steps:
+      - name: Download the verified package
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ env.RELEASE_ARTIFACT_NAME }}
+          path: ${{ runner.temp }}/release-package
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          # Pins both trusted-publisher authentication and the upload destination
+          registry-url: https://registry.npmjs.org
+
       # No credential here on purpose. npm is configured with this repo, this
       # workflow filename, and the environment above as a trusted publisher, so
-      # it exchanges the Actions OIDC token (id-token: write) for a short-lived
-      # publish token. Nothing long-lived to leak or rotate.
+      # it exchanges the Actions OIDC token for a short-lived publish token
       #
       # A mismatch in any of those three fails quietly: npm's oidc helper logs at
       # verbose and returns undefined, so the publish proceeds with no credential
-      # and the registry answers E404 "you do not have permission" -- which reads
+      # and the registry answers E404 "you do not have permission" which reads
       # like the package is missing rather than like an auth failure. To see the
       # real reason, POST the id_token to
-      # /-/npm/v1/oidc/token/exchange/package/<name> and read its message.
+      # /-/npm/v1/oidc/token/exchange/package/<name> and read its message
       #
       # --access public is mandatory on a first publish, not decoration: npm
       # treats the 404 from a not-yet-published package as "private" and refuses
-      # to generate provenance without it. Harmless on every later release.
-      #
-      # Skip the registry-facing command entirely for a dry run
-      # npm publish --dry-run still rejects versions already on the registry,
-      # making repeatable workflow validation impossible while proving no
-      # credentials, provenance, or registry acceptance
-      - name: Publish to npm
-        if: ${{ !inputs.dry_run }}
-        id: publish # the release step below keys off this step's conclusion
-        run: npm publish --provenance --access public
-
-      # Distinguishes "we uploaded a tarball" from "a user can install it"
-      # The packed-install check cannot speak to this because it never touches
-      # the registry, and the publish above is irreversible, so this is an alarm
-      # rather than a gate
-      # A dry run exercises the same helper against the existing package version
-      # while unit tests simulate delayed registry availability
-      - name: Smoke test the published package
-        run: node scripts/smoke-published.mjs
-
-      # Runs even if the smoke test failed, because the publish above is
-      # irreversible: once a version is on the registry, a flaky smoke test must
-      # not cost us the release too. A failing step otherwise skips everything
-      # after it regardless of its own condition, which would leave a live
-      # package with no release. Gated on the publish step specifically, so a
-      # failed publish still skips this. `!cancelled()` rather than `always()`
-      # -- the docs recommend it, and it still honors a cancelled run.
-      - name: Create the GitHub release
-        if: ${{ !cancelled() && steps.publish.conclusion == 'success' && startsWith(github.ref, 'refs/tags/v') && !inputs.dry_run }}
-        run: gh release create "$GITHUB_REF_NAME" artifacts/*.tgz --title "$GITHUB_REF_NAME" --generate-notes
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # to generate provenance without it. Harmless on every later release
+      - name: Publish the verified package to npm
+        run: |
+          set -euo pipefail
+          set -- "$RUNNER_TEMP"/release-package/*.tgz
+          if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+            echo "Error: expected exactly one verified package tarball"
+            exit 1
+          fi
+          npm publish "$1" --provenance --access public

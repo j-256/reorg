@@ -230,7 +230,9 @@ npm test
 npm version patch   # or minor, major
 ```
 
-That runs a guard (on `main`, in sync with `origin/main`), runs the dependency-free suite, bumps the version, commits, tags, and pushes. The tag push is what triggers the release: CI re-checks that the tag sits on `main` and matches `package.json`, runs the browser suite as a formal publishing prerequisite, re-runs the dependency-free suite and packed-install check, publishes to npm with a provenance attestation, installs the result from the registry to confirm it is really there, and opens a GitHub release with the tarball attached.
+That runs a guard (on `main`, in sync with `origin/main`), runs the dependency-free suite, bumps the version, commits, tags, and pushes. The tag push starts the `Publish npm package` workflow. Its browser and package jobs validate the tagged tree, pack it once, install and exercise that exact tarball, and preserve it as a workflow artifact. The publish job starts only after both gates pass, downloads the same verified tarball, and publishes it to npm with a provenance attestation as its final meaningful action.
+
+A successful tag-triggered publish starts the separately named `Post-release verification` workflow. That workflow installs the exact version from the registry and creates or updates the GitHub release with the preserved tarball. A failure there reports post-release verification or metadata trouble without relabeling a successful npm publish as a failed deployment.
 
 To exercise the pipeline without publishing, dispatch it manually – `dry_run` defaults to true:
 
@@ -238,11 +240,18 @@ To exercise the pipeline without publishing, dispatch it manually – `dry_run` 
 gh workflow run release.yml
 ```
 
-A dry run proves that the package builds, packs, installs, and passes its tests. It skips the registry-facing publish step entirely, then exercises the same registry-install smoke helper against the version named in `package.json`; unit tests simulate delayed registry availability. Credentials, provenance, and registry acceptance are only exercised by a real release.
+A dry run proves that the package builds, packs, installs, passes its tests, and is preserved as the release artifact. It skips the artifact download and registry-facing publish job. Credentials, provenance, registry acceptance, and the download side of the artifact handoff are only exercised by a real release.
 
-Unchecking `dry_run` on a manual dispatch is a real publish, and not the way to cut a release: dispatching has no tag, so both tag checks are skipped and no GitHub release is created – npm gets the version, the repo does not. Release by pushing a tag.
+Manual dispatches from a branch cannot publish even when `dry_run` is unchecked: the publish job also requires a `v*` tag. Release by pushing a tag.
 
-If CI fails *before* the registry accepts the upload – a bad tag, a failed test, a provenance error – the version number is untouched and you can move the tag onto the fix:
+The post-release workflow can also be exercised without changing a GitHub release. Give it the successful publish-workflow run that contains the preserved artifact and an existing published tag; `create_release` defaults to false:
+
+```bash
+publish_run="$(gh run list --workflow release.yml --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')"
+gh workflow run post-release.yml -f source_run_id="$publish_run" -f tag=v0.3.1
+```
+
+If the publish workflow fails before npm accepts the upload – a bad tag, a failed test, or an authentication error – that registry version remains available and you can move the tag onto the fix:
 
 ```bash
 npm run retag
@@ -250,15 +259,15 @@ npm run retag
 
 That moves the tag to whatever `main` currently points at, so push the fix first. `retag` runs the same guard as `npm version` and refuses from a feature branch or an unpushed `main`, since either would tag a commit the release then could not verify.
 
-`retag` only works when the tag actually moves. If the tag already points at the commit you want – a run that failed for a reason outside the repo, say a registry outage – the force-push is a no-op, git prints `Everything up-to-date`, and **no workflow runs**: Actions fires on a ref change, and nothing changed. Re-run the same commit by dispatching against the tag instead, which takes the tag's tree and skips nothing:
+`retag` only works when the tag actually moves. If the tag already points at the commit you want – a run that failed for a reason outside the repo, say a registry outage – the force-push is a no-op, git prints `Everything up-to-date`, and **no workflow runs**: Actions fires on a ref change, and nothing changed. Re-run the same commit by dispatching against the tag instead:
 
 ```bash
 gh workflow run release.yml --ref v0.1.0 -f dry_run=false
 ```
 
-The `dry_run=false` is required – dispatch defaults to a dry run, which publishes nothing. Unlike a dispatch from a branch, this one has a tag, so both tag checks run and the GitHub release is still cut.
+The `dry_run=false` is required – dispatch defaults to a dry run, which publishes nothing. Unlike a dispatch from a branch, this one has a tag, so both tag checks run and publication is allowed. A manually dispatched recovery does not start post-release automation; after publication succeeds, dispatch `post-release.yml` with the publish run id, the tag, and `create_release=true`.
 
-Once a version is on the registry it is spent; npm does not allow republishing it. A failure after that point means the package is live and the fix is the next patch, not a retag. The GitHub release is therefore cut whenever the publish succeeded, even if the registry smoke test then fails – a slow-propagating registry should not also cost you the release.
+Once a version is on the registry it is spent; npm does not allow republishing it. Before retrying any red publish run, check the registry because a lost response can leave npm with the package even when the runner did not observe success. If the version exists, do not retag or republish it: run post-release verification and use the next patch for any package change.
 
 A publish sends this README to the registry as plaintext, on every release rather than only the first, and a WAF sits in front of `registry.npmjs.org` that rejects request bodies matching attack signatures. So prose here can fail a release: a path-traversal example was once enough. npm reports the block as `E403` with boilerplate about "your security policy", naming neither the WAF nor the cause, so it reads like a credential problem. To tell them apart, PUT the same document with *no* credentials – the WAF answers before npm authenticates, so an HTML 403 indicts the payload while JSON clears it, and an unauthenticated request cannot publish.
 
