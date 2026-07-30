@@ -1,6 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { RETRY_POLICY, retryInstall } from '../scripts/smoke-published.mjs';
+import {
+  publishedInstallArgs,
+  RETRY_POLICY,
+  retryInstall,
+} from '../scripts/smoke-published.mjs';
+
+test('registry install can resolve the version published moments earlier', () => {
+  assert.deepEqual(
+    publishedInstallArgs('reorg-cli@1.2.3'),
+    [
+      'install',
+      '--no-audit',
+      '--no-fund',
+      '--min-release-age=0',
+      'reorg-cli@1.2.3',
+    ],
+  );
+});
 
 test('registry retries tolerate delayed availability after several misses', async () => {
   let calls = 0;

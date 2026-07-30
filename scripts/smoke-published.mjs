@@ -11,6 +11,7 @@ export const RETRY_POLICY = Object.freeze({
 });
 
 const LOG_TAIL_LINES = 5;
+const PUBLISHED_INSTALL_MIN_RELEASE_AGE_DAYS = 0;
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -57,6 +58,16 @@ function tail(text) {
   return text.split(/\r?\n/).slice(-LOG_TAIL_LINES).join('\n');
 }
 
+export function publishedInstallArgs(spec) {
+  return [
+    'install',
+    '--no-audit',
+    '--no-fund',
+    `--min-release-age=${PUBLISHED_INSTALL_MIN_RELEASE_AGE_DAYS}`,
+    spec,
+  ];
+}
+
 export async function smokePublished({
   npmCommand = 'npm',
   packageSpec,
@@ -75,7 +86,7 @@ export async function smokePublished({
         policy,
         install: () => runCommand(
           npmCommand,
-          ['install', '--no-audit', '--no-fund', spec],
+          publishedInstallArgs(spec),
           work,
         ),
         report: ({ attempt: failedAttempt, result }) => {
