@@ -1,14 +1,18 @@
 # reorg
 
-Reorganize a messy directory by dragging it into shape, then apply the plan with one command. Before moving anything, reorg writes an undo script.
+Reorganize a messy directory by selecting or dragging entries into shape, then apply the plan with one command. Before moving anything, reorg writes an undo script.
 
 ```
 npx reorg-cli ~/Downloads
 ```
 
-That scans the directory, opens a planner in your browser, and prints a URL. Drag folders around, rename things, mark junk for trash. Nothing touches disk until you say so.
+That scans the directory, opens a planner in your browser, and prints a URL. Select an entry to see its labeled actions, create folders at any level, move with or without drag and drop, rename things, and mark junk for trash. No planned rename, move, folder, or trash action touches the entries on disk until you say so.
 
 ![The planner mid-edit: a new folder, two moves, two entries marked for trash](docs/planner.png)
+
+When a destination does not exist yet, create and select it without leaving Move. Repeat that step to build as much nested structure as the plan needs.
+
+![The Move dialog creating a nested destination before moving a file](docs/move.png)
 
 No runtime dependencies, no build step, no config file. One Node script and a page.
 
@@ -41,7 +45,7 @@ npm run test:all
 
 `npm test` needs nothing installed, deliberately: it covers the scanner, the plan resolver, the apply engine and its undo scripts, the triage signals, the server's access control, and the browser-side plan model, all under `node --test` with nothing fetched.
 
-`npm run test:ui` drives the real page in a real Chromium, which is the only way to cover what a fake DOM cannot: drop-zone geometry is computed from the pointer's position against a row's box, and jsdom reports every box as zero-sized. It also runs a WCAG AA contrast sweep over both themes. Playwright is the one dependency in the repo and it is confined to `devDependencies`:
+`npm run test:ui` drives the real page in a real Chromium, which is the only way to cover what a fake DOM cannot: drop-zone geometry is computed from the pointer's position against a row's box, and jsdom reports every box as zero-sized. Automated accessibility coverage combines axe-core rules with a dedicated text-contrast sweep at WCAG AAA enhanced thresholds across both themes, every side panel, and every dialog. Playwright and axe-core are confined to `devDependencies`:
 
 ```bash
 npm ci && npx playwright install chromium
@@ -66,17 +70,23 @@ Short aliases are `-s` for `--static`, `-o` for `--output`, `-p` for `--port`, `
 
 In the planner:
 
-- **drag** a row onto a folder's middle to move *into* it; onto the top or bottom edge to become a sibling. Drop below the tree to move to the top level.
-- **double-click** or `F2` to rename in place.
-- **`Delete`** marks for trash. Folders take their contents with them.
-- **`n`** makes a new folder inside the selection; **`N`** attaches a note.
-- **`Space`** previews a file (first 100 lines, read on demand).
-- **`/`** jumps to the filter box; wrap the query in slashes for a regex (`/\.log$/`).
-- **`?`** lists every key.
+- **Select** a row to expose Rename, Move, New folder, Add note, and Trash or Remove actions with plain-language labels.
+- **Create folders** from the always-visible New folder button, then choose both the name and containing folder explicitly.
+- **Move** an entry with the Move dialog. If the destination is missing, create and select it in place, then repeat to build nested destinations.
+- **Drag** a row onto a folder's middle to move *into* it; onto the top or bottom edge to become a sibling. Drop below the tree to move to the top level.
+- **Use Arrow keys, Home, and End** to navigate the tree, `Enter` or `Space` to select or preview, and `Shift+F10` to open the selected entry's action menu.
+- **Double-click** or press `F2` to rename in place.
+- **Press `Delete`** to mark an entry for trash. Folders take their contents with them.
+- **Press `n`** to open New folder inside a selected folder, alongside a selected file, or at the top level when nothing is selected.
+- **Press `N`** to attach a note.
+- **Press `/`** to jump to the filter box; wrap the query in slashes for a regex (`/\.log$/`). Invalid expressions are explained without hiding the tree.
+- **Press `?`** to list every key.
 
-Toolbar toggles persist in the plan, so the view you set up is the view you come back to: **git** tints rows by git status, **heat** draws a size bar on each row, and **theme** cycles `auto` (follow the system) through forced `dark` and `light`.
+Toolbar toggles persist in the plan, so the view you set up is the view you come back to: **git status** tints rows by git status, **sizes** draws a size bar on each row, and **theme** cycles `system` through forced `dark` and `light`.
 
 Sibling order is *derived* (folders first, then natural sort), never stored. Dragging something out of a folder and back is a genuine no-op rather than a phantom "reordered" change.
+
+The planner targets WCAG 2.2 AA overall and adds AAA enhancements where they improve the experience without changing the product's compact structure. Normal and large text meet the AAA enhanced contrast thresholds in both themes, while controls meet the AA minimum target size rather than the larger AAA target. The tree, menus, dialogs, panels, status messages, focus movement, narrow single-pane layout, and reduced-motion behavior are all covered by browser tests.
 
 ## Static planner
 
@@ -89,7 +99,7 @@ reorg ~/Downloads -s -o downloads-plan.html
 
 Without `--output`, reorg writes a temporary HTML file and opens it. The page is self-contained: the tree, cleanup candidates, bounded file previews, styles, and browser code are all embedded, so it can be moved and opened directly with a `file://` URL. An explicit output path is never overwritten.
 
-The tradeoff is that a static page cannot rescan the directory, autosave to `.reorg/plan.json`, check the live filesystem, or apply anything. Edits stay in the page until **Review** exports `reorg-plan.json` by download or clipboard. Feed that export back to the CLI:
+The tradeoff is that a static page cannot rescan the directory, autosave to `.reorg/plan.json`, check the live filesystem, or apply anything. Edits stay in the page until **Review plan** exports `reorg-plan.json` by download or clipboard. Feed that export back to the CLI:
 
 ```bash
 reorg apply --plan ~/Downloads/reorg-plan.json # drift-checked dry run
@@ -104,7 +114,7 @@ A static page contains filenames, metadata, summaries, and the embedded file pre
 
 Applying a reorganization is the part that can ruin your afternoon, so the plan is always shown as the exact operations it resolves to, in order, before anything runs:
 
-![Review panel listing the resolved operations in order, with a dry-run button](docs/review.png)
+![Review panel listing the resolved operations in order, with a run safety check button](docs/review.png)
 
 - **Dry run is the default.** `reorg apply` prints and exits. Only `--yes` moves anything. The browser cannot apply at all unless you started it with `--allow-apply`.
 - **Nothing is deleted.** "Trash" moves into `.reorg/trash/<run>/`. Emptying that is a separate decision you make yourself.
@@ -138,9 +148,9 @@ Summaries are stored in the plan and keyed by path, so they survive a rescan.
 
 ## Triage: what looks disposable
 
-`reorg triage` ranks entries that look like junk and says why, so a directory that has got away from you starts with a shortlist instead of a scroll. The same list is in the planner behind the **triage** button, where each row has a mark-for-trash button.
+`reorg triage` ranks entries that look like junk and says why, so a directory that has got away from you starts with a shortlist instead of a scroll. The same list is in the planner behind the **cleanup** button, where each row has a mark-for-trash button.
 
-![Triage panel: each candidate carries the signals that flagged it and a plain-language reason](docs/triage.png)
+![Cleanup candidates panel: each candidate carries the signals that flagged it and a plain-language reason](docs/triage.png)
 
 **It ranks names and structure, not age.** That is the opposite of the obvious design, and it is deliberate: a name is frequently a direct statement of intent – someone wrote "backup" or "dryrun" because that is what the thing was for – where mtime turns out to predict almost nothing. The signals are:
 
@@ -180,7 +190,7 @@ Every entry has a stable id (its path at scan time) and two positions: the froze
 
 Move ordering is a topological sort over two constraints: vacate before occupy (if X lands where Y still is, Y goes first), and parent before child (if X lands inside where Y is going, Y arrives first). A cycle between them means no order works, which is when staging kicks in.
 
-`reorg plan` prints exactly this list, and the planner's **review** panel shows the same thing before you apply.
+`reorg plan` prints exactly this list, and the planner's **review plan** panel shows the same thing before you apply.
 
 ## Layout
 

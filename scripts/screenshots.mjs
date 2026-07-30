@@ -168,8 +168,23 @@ async function main() {
   await page.waitForTimeout(500);
   await shot(page, 'planner.png');
 
-  // 2. Triage: the panel that ranks disposable entries and says why. This is the
-  //    most distinctive screen, so it gets its own image.
+  // 2. Move: create one missing destination, then show that the same control can
+  //    immediately extend it with another nested folder
+  await page.evaluate(async () => {
+    const app = await import('/app.js');
+    app.openMoveDialog('invoice-april.pdf');
+  });
+  await page.locator('#moveTarget').selectOption({ label: 'archive' });
+  await page.locator('#moveCreateName').fill('invoices');
+  await page.getByRole('button', { name: 'Create and select' }).click();
+  await page.locator('#moveCreateName').fill('2026');
+  await page.waitForTimeout(250);
+  await shot(page, 'move.png');
+  await page.keyboard.press('Escape');
+  await page.waitForFunction(() => !document.querySelector('#moveDialog')?.open);
+  await page.waitForFunction(() => !document.querySelector('#toast')?.classList.contains('show'));
+
+  // 3. Triage: the panel that ranks disposable entries and says why
   await page.evaluate(async () => {
     const side = await import('/lib/side.js');
     side.showTriage();
@@ -177,8 +192,7 @@ async function main() {
   await page.waitForTimeout(600);
   await shot(page, 'triage.png');
 
-  // 3. Review: the resolved operations, which is the safety story in one frame --
-  //    exactly what will happen, before anything happens.
+  // 4. Review: the resolved operations, which is the safety story in one frame
   await page.evaluate(async () => {
     const side = await import('/lib/side.js');
     side.showReview();
