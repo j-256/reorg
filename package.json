@@ -1,6 +1,6 @@
 {
   "name": "reorg-cli",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Plan directory reorganizations in your browser, preview every operation, and apply or undo them from the CLI.",
   "keywords": [
     "cleanup",
