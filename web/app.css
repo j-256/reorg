@@ -275,9 +275,10 @@ h1, h2 { margin: 0; font: inherit; }
 }
 
 .row {
+  --tree-item-gap: 5px;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: var(--tree-item-gap);
   min-height: var(--row-h);
   padding: 2px 6px;
   border: 1px solid transparent;
@@ -317,6 +318,10 @@ h1, h2 { margin: 0; font: inherit; }
 .twist:focus-visible { outline: 2px solid var(--accent); }
 .twist[disabled] { cursor: not-allowed; opacity: 1; }
 .icon { flex: 0 0 13px; width: 13px; text-align: center; color: var(--ink-dim); font-size: 10px; }
+.row.kind-dir > .icon { display: none; }
+.row.kind-dir > .twist:not([hidden]) + .icon + .name {
+  margin-left: calc(-1 * var(--tree-item-gap));
+}
 .name { color: var(--ink); white-space: nowrap; }
 .name.dir { color: var(--accent); font-weight: 500; }
 .name.dir::after { content: "/"; color: var(--ink-faint); font-weight: 400; }

@@ -64,6 +64,36 @@ test('nothing is marked as changed on a fresh scan', async () => {
   }
 });
 
+test('folder labels stay attached to their caret and lead their children', async () => {
+  const p = await planner(TREE);
+  try {
+    const geometry = await p.page.evaluate(() => {
+      const folder = document.querySelector('.row[data-id="docs"]');
+      const child = document.querySelector('.row[data-id="docs/note.md"]');
+      const caret = folder.querySelector('.twist').getBoundingClientRect();
+      const folderName = folder.querySelector('.name').getBoundingClientRect();
+      const childName = child.querySelector('.name').getBoundingClientRect();
+      return {
+        caretRight: caret.right,
+        folderNameLeft: folderName.left,
+        childNameLeft: childName.left,
+        folderIconDisplay: getComputedStyle(folder.querySelector('.icon')).display,
+      };
+    });
+    assert.equal(geometry.folderIconDisplay, 'none');
+    assert.ok(
+      Math.abs(geometry.folderNameLeft - geometry.caretRight) < 1,
+      'the folder label begins where its caret target ends'
+    );
+    assert.ok(
+      geometry.childNameLeft - geometry.folderNameLeft >= 10,
+      'the child label is visibly indented beyond its folder label'
+    );
+  } finally {
+    await p.close();
+  }
+});
+
 test('plan-only scope and unavailable filters are explicit on first load', async () => {
   const p = await planner(TREE);
   try {

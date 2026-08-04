@@ -127,6 +127,7 @@ function renderNode(n, matcher, level) {
   const tpl = document.getElementById('tpl-row');
   const row = tpl.content.firstElementChild.cloneNode(true).querySelector('.row');
   row.dataset.id = n.id;
+  row.classList.add(`kind-${n.kind}`);
   if (n.git) row.classList.add('g-' + n.git);
 
   const tags = changesOf(n);
