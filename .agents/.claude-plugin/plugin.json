@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "reorg",
+  "displayName": "Reorg",
+  "description": "Collaborate with an AI agent on directory reorganizations through Reorg's shared, revisioned workspace.",
+  "author": {
+    "name": "j-256",
+    "url": "https://github.com/j-256"
+  },
+  "homepage": "https://github.com/j-256/reorg",
+  "repository": "https://github.com/j-256/reorg",
+  "license": "AGPL-3.0-only",
+  "keywords": [
+    "ai",
+    "collaboration",
+    "directory-organization",
+    "file-management",
+    "planning"
+  ]
+}

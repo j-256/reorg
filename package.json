@@ -1,14 +1,17 @@
 {
   "name": "reorg-cli",
   "version": "0.4.0",
-  "description": "Plan directory reorganizations in your browser, preview every operation, and apply or undo them from the CLI.",
+  "description": "Plan directory reorganizations yourself or with an AI agent, collaborate through a live browser plan, and safely apply changes with generated undo scripts.",
   "keywords": [
     "cleanup",
     "reorganize",
     "files",
     "directory",
     "tree",
-    "planner"
+    "planner",
+    "ai",
+    "agent",
+    "collaboration"
   ],
   "license": "AGPL-3.0-only",
   "author": "j-256",

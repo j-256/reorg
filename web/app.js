@@ -1236,7 +1236,7 @@ function renderScopeBanner() {
     detail = 'browser actions update the shared workspace; files move only after Review, Apply, and confirmation';
   } else {
     lead.textContent = 'Planning only: ';
-    detail = 'browser actions update the shared workspace; files stay on disk until you run reorg apply --yes';
+    detail = 'browser actions update the shared workspace; files stay on disk until you restart with --allow-apply or run reorg apply --yes';
   }
   banner.append(lead, document.createTextNode(detail));
   banner.classList.toggle('bad', !!store.scan.truncated);
@@ -1261,7 +1261,7 @@ async function boot() {
       el(
         'p',
         'problem',
-        `Could not reach the reorg server: ${e.message}\n\nOpen the URL printed by the reorg command -- it carries the access token this page needs.`
+        `Could not reach the Reorg server: ${e.message}\n\nOpen the URL printed by the reorg command -- it carries the access token this page needs.`
       )
     );
     return;
@@ -1269,7 +1269,7 @@ async function boot() {
 
   store.init(data);
   $('#rootLabel').textContent = data.scan.root;
-  document.title = `reorg \u00b7 ${data.scan.root.split('/').filter(Boolean).pop() || '/'}`;
+  document.title = `Reorg \u00b7 ${data.scan.root.split('/').filter(Boolean).pop() || '/'}`;
 
   const c = data.scan.counts;
   $('#treeHint').textContent =

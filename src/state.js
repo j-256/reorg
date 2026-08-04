@@ -131,7 +131,7 @@ export function emptyView(legacyUi = {}) {
 function selfIgnore(dir) {
   const f = join(dir, '.gitignore');
   if (existsSync(f)) return;
-  writeFileSync(f, '# reorg working state -- not source. Ignored wholesale.\n*\n');
+  writeFileSync(f, '# Reorg working state -- not source; ignored wholesale\n*\n');
 }
 
 export function ensureStateDir(root, dataDir = null) {

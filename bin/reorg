@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// reorg -- plan directory reorganizations in the browser, then apply or undo them from the CLI
+// reorg -- plan alone or with an AI agent, then safely apply with generated undo
 
 import {
   cpSync,
@@ -66,7 +66,7 @@ const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.u
 
 const RECOVERY_ENTRY_NAMES = new Set(['history.jsonl', 'stage', 'trash']);
 
-const HELP = `reorg ${VERSION} -- plan a directory reorganization, then apply it safely.
+const HELP = `reorg ${VERSION} -- plan alone or collaborate with an AI agent, then apply safely.
 
 USAGE
   reorg [dir]                    scan dir (default .), serve the planner, open a browser
@@ -310,14 +310,14 @@ function copyPortableState(source, target, entries, workspace, { merge = false }
     for (const name of entries) rmSync(join(source, name), { recursive: true });
   } catch (error) {
     throw new Error(
-      `Copied reorg data to ${target}, but could not remove portable state from ${source} (${error.message})`
+      `Copied Reorg data to ${target}, but could not remove portable state from ${source} (${error.message})`
     );
   }
 }
 
 function moveWorkspaceData(sourceDir, destination) {
   const workspace = loadWorkspace('.', sourceDir);
-  if (!workspace) throw new Error(`${sourceDir} is not a reorg workspace`);
+  if (!workspace) throw new Error(`${sourceDir} is not a Reorg workspace`);
   const source = validateDataDir(workspace.root, sourceDir);
   const target = validateDataDir(workspace.root, destination);
   assertWorkspaceStopped(workspace.root, source);
@@ -508,14 +508,14 @@ async function main() {
       if (!third) throw new Error('reorg state move requires a destination');
       const result = moveWorkspaceData(resolvePath(opts.dataDir), resolvePath(third));
       if (opts.json) console.log(JSON.stringify(result, null, 2));
-      else console.log(`Moved reorg data from ${result.source} to ${result.destination}`);
+      else console.log(`Moved Reorg data from ${result.source} to ${result.destination}`);
       return;
     }
     if (second === 'rebind') {
       if (!third) throw new Error('reorg state rebind requires a new root');
       const dataDir = resolvePath(opts.dataDir);
       const workspace = loadWorkspace('.', dataDir);
-      if (!workspace) throw new Error(`${dataDir} is not a reorg workspace`);
+      if (!workspace) throw new Error(`${dataDir} is not a Reorg workspace`);
       assertWorkspaceStopped(workspace.root, dataDir);
       const newRoot = resolveRoot(third);
       validateDataDir(newRoot, dataDir);

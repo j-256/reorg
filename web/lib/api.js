@@ -27,7 +27,7 @@ async function request(method, path, body) {
       body: body === undefined ? undefined : JSON.stringify(body),
     });
   } catch (e) {
-    throw new Error(`the reorg server is not responding (${e.message}). Is it still running?`);
+    throw new Error(`the Reorg server is not responding (${e.message}). Is it still running?`);
   }
 
   const text = await res.text();

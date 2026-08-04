@@ -271,9 +271,9 @@ export async function emitPrompts({ root, dataDir = null, paths, force = false }
   for (const e of entries) stub[e.path] = '';
 
   const doc = [
-    '# Summarize these files for reorg',
+    '# Summarize these files for Reorg',
     '',
-    'A one-line summary per file, so the reorg planner can show what each file',
+    'A one-line summary per file, so the Reorg planner can show what each file',
     'actually is while its owner decides where it belongs.',
     '',
     '## What to do',
@@ -281,7 +281,7 @@ export async function emitPrompts({ root, dataDir = null, paths, force = false }
     `1. Read each path listed below (they are relative to \`${root}\`).`,
     `2. Fill in every empty string in \`${OUT_FILE}\` (same directory as this file).`,
     '3. Keep the keys exactly as they are -- they are node ids the planner matches on.',
-    '4. Reload the reorg page; summaries appear inline in the tree.',
+    '4. Reload the Reorg page; summaries appear inline in the tree.',
     '',
     '## Rules for each summary',
     '',

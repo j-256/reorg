@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
+  "name": "reorg",
+  "description": "AI collaboration for safe directory reorganizations with Reorg",
+  "owner": {
+    "name": "j-256",
+    "url": "https://github.com/j-256"
+  },
+  "plugins": [
+    {
+      "name": "reorg",
+      "source": "./.agents",
+      "description": "Collaborate with an AI agent on directory reorganizations through Reorg's shared, revisioned workspace.",
+      "category": "productivity",
+      "tags": [
+        "ai",
+        "collaboration",
+        "file-management"
+      ],
+      "homepage": "https://github.com/j-256/reorg",
+      "repository": "https://github.com/j-256/reorg"
+    }
+  ]
+}

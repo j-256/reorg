@@ -1,12 +1,14 @@
-# reorg
+# Reorg
 
-Reorganize a messy directory by selecting or dragging entries into shape, then apply the plan with one command. Before moving anything, reorg writes an undo script.
+Reorganize a directory yourself in the browser, or collaborate with an AI agent in real time on the same plan. Reorg validates every operation and leaves the filesystem untouched until you explicitly apply; when an agent joins, the scanned tree, proposed changes, and UI state become shared context that you can see and steer.
 
 ```
 npx reorg-cli@latest ~/Downloads
 ```
 
-That scans the directory, opens a planner in your browser, and prints a URL. Select an entry to see its labeled actions, create folders at any level, move with or without drag and drop, rename things, and mark junk for trash. No planned rename, move, folder, or trash action touches the entries on disk until you say so.
+That scans the directory, opens the planner in your browser, and prints a URL. You can select an entry to see its labeled actions, create folders at any level, move with or without drag and drop, rename things, and mark junk for trash. The browser and CLI are complete on their own; no AI agent is required. With the [Agent Skill](#collaborate-with-an-ai-agent) installed, you can instead ask your agent to propose or make those changes while you watch, review, and redirect the same plan. No planned rename, move, folder, or trash action touches the entries on disk until you say so.
+
+> Help me organize `~/Downloads` with Reorg. Start by showing me what you would change, then keep the browser in sync as we work through it together.
 
 ![The planner mid-edit: a new folder, two moves, two entries marked for trash](docs/planner.png)
 
@@ -18,7 +20,9 @@ No runtime dependencies, no build step, no config file. One Node script and a pa
 
 ## Why
 
-Cleaning up a directory has two distinct parts: deciding what its shape should be, and safely realizing that plan on disk. reorg keeps them separate. You arrange the whole tree in a planner where every change is reversible with a keystroke. When the shape looks right, reorg compiles the plan into ordered filesystem operations for applying and undoing the changes, with collisions caught before anything moves.
+Cleaning up a directory has two distinct parts: deciding what its shape should be, and safely realizing that plan on disk. An AI agent can accelerate the first part only when you and the agent can see the same state, build on each other's decisions, and catch stale or conflicting intent. Reorg provides that shared, revisioned planning surface, then compiles the agreed plan into ordered filesystem operations for applying and undoing the changes, with collisions caught before anything moves.
+
+This makes the agent a collaborator rather than a black-box file mover. It can understand contents, propose structure, update the plan, and focus the browser on what it is discussing; Reorg remains responsible for state, validation, attribution, dry runs, application, and recovery.
 
 It is useful for a `~/Downloads` that got away from you, a repo whose layout no longer matches how you think about it, or a scratch directory you have been meaning to triage for a year.
 
@@ -111,9 +115,38 @@ Sibling order is *derived* (folders first, then natural sort), never stored. Dra
 
 The planner targets WCAG 2.2 AA overall and adds AAA enhancements where they improve the experience without changing the product's compact structure. Normal and large text meet the AAA enhanced contrast thresholds in both themes, while controls meet the AA minimum target size rather than the larger AAA target. The tree, menus, dialogs, panels, status messages, focus movement, narrow single-pane layout, and reduced-motion behavior are all covered by browser tests.
 
-## Shared workspace and AI agents
+## Collaborate with an AI agent
 
-The browser, CLI, and an AI agent use one authoritative workspace. The browser submits semantic commands through the token-gated server API. An agent submits the same command vocabulary through `reorg mutate` and `reorg view`; it should never edit a state file directly. Both paths reach the same revision-checked command layer, while filesystem paths remain unchanged until an explicitly authorized apply runs.
+Reorg turns directory organization into a shared session. The browser and agent use one authoritative workspace, and the browser watches its revisions so each collaborator sees the other's plan and view changes in real time. Shared filters, collapsed folders, selection, and side-panel context let the agent answer "what is Reorg displaying?" and focus the interface on the entry it is discussing.
+
+The browser submits semantic commands through the token-gated server API. An agent submits the same command vocabulary through `reorg mutate` and `reorg view`; it never edits a state file directly. Both paths reach the same revision-checked command layer, stale intent becomes a visible conflict instead of an overwrite, and source paths remain unchanged until an explicitly authorized apply runs.
+
+The source checkout includes one canonical [Reorg Agent Skill](.agents/skills/reorg/SKILL.md). Codex discovers it from `.agents/skills`, while Claude Code discovers the same folder through `.claude/skills`. Invoke `$reorg` in Codex or `/reorg` in Claude Code to inspect or organize a directory through the shared workspace.
+
+The Skill is instruction-only. It selects the first compatible CLI by checking `reorg schema --json`: the source-checkout command, an installed `reorg`, then `npx --yes reorg-cli@latest`. The `npx` fallback may populate npm's cache but does not install a global command. Every deterministic state transition remains in Reorg's revisioned CLI.
+
+To install the Skill globally without cloning the repository, download its single canonical file into the personal Skill directory for your agent:
+
+```bash
+REORG_SKILL_URL="https://raw.githubusercontent.com/j-256/reorg/main/.agents/skills/reorg/SKILL.md"
+
+# Codex
+mkdir -p "$HOME/.agents/skills/reorg"
+curl -fsSL "$REORG_SKILL_URL" -o "$HOME/.agents/skills/reorg/SKILL.md"
+
+# Claude Code
+mkdir -p "$HOME/.claude/skills/reorg"
+curl -fsSL "$REORG_SKILL_URL" -o "$HOME/.claude/skills/reorg/SKILL.md"
+```
+
+Claude Code users can instead install the Skill as a user-scoped plugin, which gives it the namespaced `/reorg:reorg` command and marketplace updates:
+
+```bash
+claude plugin marketplace add j-256/reorg
+claude plugin install reorg@reorg --scope user
+```
+
+Use either the direct Claude Code installation or the plugin installation so Claude does not load the same workflow twice. Installing `reorg-cli` globally remains useful for the bare `reorg` command and avoids the `npx` startup path, but the Skill does not require it.
 
 The workspace contains related state with different jobs:
 
@@ -125,7 +158,7 @@ The workspace contains related state with different jobs:
 | `view.json` | the independently revisioned filters, collapsed folders, selection, theme, and side panel |
 | `transactions.jsonl` | append-only attribution and command history for plan changes |
 
-`reorg inspect --json` answers both "what is planned?" and "what is reorg displaying?". Its projection explains whether each node is visible, filtered, hidden under a collapsed ancestor, dimmed by a change filter, muted as git-ignored, selected, or shown with size tinting. It also returns recent attributed plan transactions and the exact ordered operations the canonical plan resolves to.
+`reorg inspect --json` answers both "what is planned?" and "what is Reorg displaying?". Its projection explains whether each node is visible, filtered, hidden under a collapsed ancestor, dimmed by a change filter, muted as git-ignored, selected, or shown with size tinting. It also returns recent attributed plan transactions and the exact ordered operations the canonical plan resolves to.
 
 `reorg inspect` deliberately reads the frozen scan rather than silently replacing it with the live filesystem. Starting the browser also reuses an existing frozen scan unless explicit scan options request a new one. Use `reorg rescan --json` when a collaborator intentionally wants to refresh that shared baseline; a running browser adopts the new scan through the same workspace.
 
@@ -143,7 +176,7 @@ reorg mutate ~/Downloads --input - --json <<'JSON'
 {
   "expectedRevision": 4,
   "transactionId": "organize-writing-1",
-  "actor": "codex",
+  "actor": "my-agent",
   "commands": [
     { "type": "create-folder", "id": "new:writing", "parentId": ".", "name": "Writing" },
     { "type": "move", "id": "draft.md", "parentId": "new:writing" }
@@ -188,7 +221,7 @@ reorg ~/Downloads -s
 reorg ~/Downloads -s -o downloads-plan.html
 ```
 
-Without `--output`, reorg writes a temporary HTML file and opens it. The page is self-contained: the tree, cleanup candidates, bounded file previews, styles, and browser code are all embedded, so it can be moved and opened directly with a `file://` URL. An explicit output path is never overwritten.
+Without `--output`, Reorg writes a temporary HTML file and opens it. The page is self-contained: the tree, cleanup candidates, bounded file previews, styles, and browser code are all embedded, so it can be moved and opened directly with a `file://` URL. An explicit output path is never overwritten.
 
 The tradeoff is that a static page cannot rescan the directory, autosave to the shared workspace, check the live filesystem, or apply anything. Edits stay in the page until **Review plan** exports `reorg-plan.json` by download or clipboard. Feed that export back to the CLI:
 
@@ -212,8 +245,8 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 - **Drift aborts the whole batch.** Every source path is checked to still exist and every destination to be free *before* the first move. If the tree changed since the scan, nothing is applied – not "nothing further", nothing at all.
 - **An undo script is written before execution starts**, so even a crash mid-run leaves a way back. It is guarded per step, so running it after a partial apply undoes only what happened.
 - **Collisions are caught at plan time**, not discovered at move time: two entries landing on one path, a folder marked for trash that still holds things you kept, a folder dragged inside itself.
-- **`git mv` for tracked files**, so history follows the move. (Git refuses this on a fully-untracked directory; reorg falls back to a plain rename there.)
-- **Rename cycles work.** Swapping two names is impossible with direct renames in any order, so reorg routes cycle members through a staging directory instead of failing.
+- **`git mv` for tracked files**, so history follows the move. (Git refuses this on a fully-untracked directory; Reorg falls back to a plain rename there.)
+- **Rename cycles work.** Swapping two names is impossible with direct renames in any order, so Reorg routes cycle members through a staging directory instead of failing.
 
 The semantic plan remains a diff against the frozen scan rather than a second copy of the tree. The default `.reorg/` workspace git-ignores itself on creation, so planning a repo's layout never dirties that repo.
 

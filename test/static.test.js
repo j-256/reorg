@@ -40,7 +40,7 @@ test('--help includes the package version in its header', () => {
   assert.equal(result.status, 0, result.stderr);
   assert.equal(
     result.stdout.split(/\r?\n/, 1)[0],
-    `reorg ${PACKAGE_VERSION} -- plan a directory reorganization, then apply it safely.`
+    `reorg ${PACKAGE_VERSION} -- plan alone or collaborate with an AI agent, then apply safely.`
   );
   assert.match(result.stdout, /--allow-apply/);
 });
