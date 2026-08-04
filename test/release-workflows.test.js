@@ -48,6 +48,10 @@ test('post-release checks cannot change the publish workflow result', () => {
   assert.ok(smokeJobIndex > -1, 'registry smoke has its own job');
   assert.ok(releaseJobIndex > smokeJobIndex, 'release metadata has its own job');
   assert.match(POST_RELEASE_WORKFLOW.slice(releaseJobIndex), /needs: artifact/);
+  assert.match(
+    POST_RELEASE_WORKFLOW.slice(releaseJobIndex),
+    /GH_REPO: \$\{\{ github\.repository \}\}/,
+  );
   assert.doesNotMatch(POST_RELEASE_WORKFLOW.slice(releaseJobIndex), /needs: smoke/);
   assert.ok(contentsWriteIndex > releaseJobIndex, 'only the release job can write');
   assert.equal(POST_RELEASE_WORKFLOW.match(/contents: write/g)?.length, 1);

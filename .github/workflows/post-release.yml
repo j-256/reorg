@@ -129,6 +129,7 @@ jobs:
       actions: read
       contents: write
     env:
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.artifact.outputs.release_tag }}
       SOURCE_RUN_ID: ${{ needs.artifact.outputs.source_run_id }}
     steps:
