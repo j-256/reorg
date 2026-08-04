@@ -3,7 +3,7 @@
 Reorganize a messy directory by selecting or dragging entries into shape, then apply the plan with one command. Before moving anything, reorg writes an undo script.
 
 ```
-npx reorg-cli ~/Downloads
+npx reorg-cli@latest ~/Downloads
 ```
 
 That scans the directory, opens a planner in your browser, and prints a URL. Select an entry to see its labeled actions, create folders at any level, move with or without drag and drop, rename things, and mark junk for trash. No planned rename, move, folder, or trash action touches the entries on disk until you say so.
@@ -18,19 +18,32 @@ No runtime dependencies, no build step, no config file. One Node script and a pa
 
 ## Why
 
-Cleaning up a directory is two jobs that get tangled together: *deciding* what the shape should be, and *executing* a pile of `mv` commands without breaking anything. Doing both at once in a terminal means you lose the plan halfway through, or you discover the conflict after the third move.
-
-reorg splits them. You do all the deciding in a view where the whole tree is visible and every change is reversible with a keystroke. When the shape looks right, the tool works out the operations – in a correct order, with collisions caught up front – and executes them as one checked batch that it can also undo.
+Cleaning up a directory has two distinct parts: deciding what its shape should be, and safely realizing that plan on disk. reorg keeps them separate. You arrange the whole tree in a planner where every change is reversible with a keystroke. When the shape looks right, reorg compiles the plan into ordered filesystem operations for applying and undoing the changes, with collisions caught before anything moves.
 
 It is useful for a `~/Downloads` that got away from you, a repo whose layout no longer matches how you think about it, or a scratch directory you have been meaning to triage for a year.
 
 ## Install
 
-Nothing to install: `npx reorg-cli <dir>` runs it, and installs the command as `reorg`. Or clone and link it:
+Install globally to add the `reorg` command:
+
+```bash
+npm install -g reorg-cli
+reorg ~/Downloads
+```
+
+For a one-off run, use the latest release without installing a persistent command:
+
+```bash
+npx reorg-cli@latest ~/Downloads
+```
+
+npm may cache the downloaded package, but `reorg` is not available as an installed command afterward. To run from a source checkout, clone and link it:
 
 ```bash
 git clone https://github.com/j-256/reorg
-cd reorg && npm link      # then: reorg <dir>
+cd reorg
+npm link
+reorg ~/Downloads
 ```
 
 Requires Node 22 or newer – the oldest release still receiving security updates. There are no runtime dependencies: `package.json` has an empty `dependencies` block and that is deliberate.
