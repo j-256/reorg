@@ -18,20 +18,23 @@ export const store = {
   seq: 0,
   noteSeq: 0,
   savedAt: null,
+  planRevision: 0,
+  viewRevision: 0,
+  recentTransactions: [],
+  recentTransactionDigests: {},
   selectedId: null,
-  allowApply: false,
+  sideView: { mode: 'none', targetId: null },
   static: false,
   undoScripts: [],
 
   init(data) {
-    this.allowApply = !!data.allowApply;
     this.static = !!data.static;
     this.undoScripts = data.undoScripts || [];
-    this.applyScan(data.scan, data.plan || {});
+    this.applyScan(data.scan, data.plan || {}, data.view || null);
     this.savedAt = (data.plan && data.plan.savedAt) || null;
   },
 
-  applyScan(scan, plan) {
+  applyScan(scan, plan, view = null) {
     this.scan = scan;
     this.nodes = new Map();
     for (const n of scan.nodes) {
@@ -72,15 +75,20 @@ export const store = {
       if (o.cur) n.cur = { ...o.cur };
       n.evicted = !!o.evicted;
     }
-    // Reveal what the plan touches, so a reloaded page shows the work instead of
-    // hiding it inside collapsed folders.
-    for (const n of this.nodes.values()) {
-      if (!changesOf(n).length) continue;
-      let p = this.nodes.get(n.cur.parentId);
-      let guard = 0;
-      while (p && guard++ < 64) {
-        p.collapsed = false;
-        p = this.nodes.get(p.cur.parentId);
+    if (view && view.treeInitialized) {
+      const collapsed = new Set(view.collapsed || []);
+      for (const n of this.nodes.values()) if (isDir(n)) n.collapsed = collapsed.has(n.id);
+    } else {
+      // Reveal what the plan touches, so a reloaded page shows the work instead of
+      // hiding it inside collapsed folders
+      for (const n of this.nodes.values()) {
+        if (!changesOf(n).length) continue;
+        let p = this.nodes.get(n.cur.parentId);
+        let guard = 0;
+        while (p && guard++ < 64) {
+          p.collapsed = false;
+          p = this.nodes.get(p.cur.parentId);
+        }
       }
     }
     this.notes = (plan.notes || []).slice();
@@ -88,9 +96,15 @@ export const store = {
     // Git tinting is on by default in a repo: which entries git tracks, ignores,
     // or has never seen is usually the first question worth answering, and a layer
     // you have to discover is a layer most people never turn on.
-    this.ui = { git: !!scan.git, ...(plan.ui || {}) };
+    this.ui = { git: !!scan.git, ...(plan.ui || {}), ...(view?.ui || {}) };
     this.seq = plan.seq || highestSeq(plan.created || []);
     this.noteSeq = plan.noteSeq || highestSeq(this.notes);
+    this.planRevision = Number.isInteger(plan.revision) ? plan.revision : 0;
+    this.viewRevision = Number.isInteger(view?.revision) ? view.revision : 0;
+    this.recentTransactions = Array.isArray(plan.recentTransactions) ? plan.recentTransactions.slice() : [];
+    this.recentTransactionDigests = { ...(plan.recentTransactionDigests || {}) };
+    this.selectedId = view?.selectedId && this.nodes.has(view.selectedId) ? view.selectedId : null;
+    this.sideView = { mode: 'none', targetId: null, ...(view?.side || {}) };
   },
 
   serialize() {
@@ -110,9 +124,26 @@ export const store = {
       created,
       notes: this.notes,
       summaries: this.summaries,
-      ui: this.ui,
       seq: this.seq,
       noteSeq: this.noteSeq,
+      revision: this.planRevision,
+      recentTransactions: this.recentTransactions,
+      recentTransactionDigests: this.recentTransactionDigests,
+    };
+  },
+
+  serializeView(side = this.sideView) {
+    return {
+      version: 1,
+      revision: this.viewRevision,
+      ui: { ...this.ui },
+      treeInitialized: true,
+      collapsed: [...this.nodes.values()]
+        .filter((node) => isDir(node) && node.collapsed)
+        .map((node) => node.id)
+        .sort(),
+      selectedId: this.selectedId,
+      side,
     };
   },
 

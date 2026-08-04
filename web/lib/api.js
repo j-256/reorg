@@ -1,6 +1,6 @@
 /* Fetch wrapper. Carries the per-run token the server requires, and surfaces the
  * server's own error message rather than a bare status code -- those messages are
- * written to be actionable ("restart with --allow-apply"), so losing them hurts. */
+ * written to be actionable, so losing them hurts */
 
 let token = '';
 let requestHandler = null;

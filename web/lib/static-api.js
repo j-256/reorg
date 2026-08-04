@@ -11,8 +11,8 @@ export function installStaticApi(data, { resolvePlan, describeOp }) {
       return {
         scan: data.scan,
         plan: data.plan,
+        view: data.view,
         gitignore: data.gitignore,
-        allowApply: false,
         undoScripts: data.undoScripts,
         static: true,
       };
@@ -38,9 +38,6 @@ export function installStaticApi(data, { resolvePlan, describeOp }) {
       throw new Error('A static planner cannot check or write to disk; export the plan and apply it with the CLI');
     }
 
-    if (method === 'PUT' && path === '/api/plan') {
-      throw new Error('A static planner cannot save to disk; export the plan to keep it');
-    }
     if (method === 'POST' && path === '/api/rescan') {
       throw new Error('A static planner cannot rescan the directory; generate a new page from the CLI');
     }

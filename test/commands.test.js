@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, symlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { scan } from '../src/scan.js';
 import {
@@ -16,6 +16,7 @@ import {
   loadScan,
   loadView,
   planPath,
+  savePlan,
   saveScan,
   saveView,
 } from '../src/state.js';
@@ -105,6 +106,20 @@ test('transactions are revision checked and idempotent by transaction id', () =>
           root: w.root,
           dataDir: w.dataDir,
           scan: w.scan,
+          expectedRevision: 1,
+          transactionId: 'tx-1',
+          actor: 'test-agent',
+          commands: [{ type: COMMAND.RENAME, id: 'keep.txt', name: 'different.txt' }],
+        }),
+      (error) => error instanceof CommandError && error.code === 'idempotency-conflict'
+    );
+
+    assert.throws(
+      () =>
+        transactPlan({
+          root: w.root,
+          dataDir: w.dataDir,
+          scan: w.scan,
           expectedRevision: 0,
           transactionId: 'tx-2',
           commands: [{ type: COMMAND.RENAME, id: 'keep.txt', name: 'kept.txt' }],
@@ -112,6 +127,50 @@ test('transactions are revision checked and idempotent by transaction id', () =>
       RevisionConflictError
     );
     assert.equal(loadPlan(w.root, w.dataDir).revision, 1);
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('no-op transaction ids stay idempotent after later plan changes', () => {
+  const w = workspace();
+  try {
+    const noOp = transactPlan({
+      root: w.root,
+      dataDir: w.dataDir,
+      scan: w.scan,
+      expectedRevision: 0,
+      transactionId: 'no-op',
+      commands: [{ type: COMMAND.RENAME, id: 'keep.txt', name: 'keep.txt' }],
+    });
+    assert.equal(noOp.changed, false);
+    assert.equal(noOp.plan.revision, 0);
+    assert.ok(noOp.plan.recentTransactions.includes('no-op'));
+    savePlan(
+      w.root,
+      { ...noOp.plan, recentTransactions: [], recentTransactionDigests: {} },
+      w.dataDir
+    );
+
+    transactPlan({
+      root: w.root,
+      dataDir: w.dataDir,
+      scan: w.scan,
+      expectedRevision: 0,
+      transactionId: 'later-change',
+      commands: [{ type: COMMAND.MOVE, id: 'keep.txt', parentId: 'docs' }],
+    });
+    const replay = transactPlan({
+      root: w.root,
+      dataDir: w.dataDir,
+      scan: w.scan,
+      expectedRevision: 0,
+      transactionId: 'no-op',
+      commands: [{ type: COMMAND.RENAME, id: 'keep.txt', name: 'keep.txt' }],
+    });
+    assert.equal(replay.duplicate, true);
+    assert.equal(replay.plan.revision, 1);
+    assert.equal(replay.plan.overrides[0].cur.parentId, 'docs');
   } finally {
     w.cleanup();
   }
@@ -196,11 +255,16 @@ test('an external data directory holds the portable workspace state', () => {
 
 test('an explicit data directory inside the source is refused', () => {
   const root = sandbox(TREE);
+  const outside = sandbox({});
   try {
     assert.throws(() => ensureWorkspace(root, root), /cannot be used/);
     assert.throws(() => ensureWorkspace(root, join(root, 'state')), /must be outside/);
+    const alias = join(outside, 'inside-alias');
+    symlinkSync(join(root, 'docs'), alias, 'dir');
+    assert.throws(() => ensureWorkspace(root, join(alias, 'state')), /must be outside/);
     assert.doesNotThrow(() => ensureWorkspace(root, join(root, '.reorg')));
   } finally {
+    cleanup(outside);
     cleanup(root);
   }
 });
@@ -256,6 +320,42 @@ test('view updates use an independent revision', () => {
         }),
       RevisionConflictError
     );
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('the first view update retires legacy UI fields from the plan', () => {
+  const w = workspace();
+  try {
+    savePlan(w.root, { ...loadPlan(w.root, w.dataDir), ui: { theme: 'dark' } }, w.dataDir);
+    const result = transactView({
+      root: w.root,
+      dataDir: w.dataDir,
+      expectedRevision: 0,
+      patch: {},
+    });
+    assert.equal(result.view.ui.theme, 'dark');
+    assert.deepEqual(loadPlan(w.root, w.dataDir).ui, {});
+  } finally {
+    w.cleanup();
+  }
+});
+
+test('invalid view updates are rejected without advancing their revision', () => {
+  const w = workspace();
+  try {
+    assert.throws(
+      () =>
+        transactView({
+          root: w.root,
+          dataDir: w.dataDir,
+          expectedRevision: 0,
+          patch: { ui: { theme: 'solarized' } },
+        }),
+      (error) => error instanceof CommandError && /theme/.test(error.message)
+    );
+    assert.equal(loadView(w.root, w.dataDir).revision, 0);
   } finally {
     w.cleanup();
   }

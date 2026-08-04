@@ -9,10 +9,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { createReorgServer } from '../src/server.js';
-import { loadPlan } from '../src/state.js';
+import { acquireWorkspaceLock } from '../src/state.js';
 import { sandbox, cleanup } from './helpers.js';
+
+const CLI = new URL('../bin/reorg', import.meta.url);
 
 const TREE = {
   'keep.txt': 'keep me',
@@ -24,7 +27,9 @@ const TREE = {
 // Boot a server on an ephemeral port and hand back a fetch bound to it.
 async function serve(layout, opts = {}) {
   const root = sandbox(layout);
-  const { server, token } = createReorgServer({ root, ...opts });
+  const { prepare, ...serverOptions } = opts;
+  if (prepare) await prepare(root);
+  const { server, token } = createReorgServer({ root, ...serverOptions });
   await new Promise((done) => server.listen(0, '127.0.0.1', done));
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -51,6 +56,21 @@ async function serve(layout, opts = {}) {
       cleanup(root);
     },
   };
+}
+
+async function mutate(s, commands, extra = {}) {
+  const tree = await (await s.call('/api/tree')).json();
+  const res = await s.call('/api/transactions', {
+    method: 'POST',
+    body: {
+      expectedRevision: tree.plan.revision,
+      transactionId: extra.transactionId || `test:${crypto.randomUUID()}`,
+      actor: 'server-test',
+      commands,
+    },
+  });
+  assert.equal(res.status, 200);
+  return res.json();
 }
 
 test('the API is unreachable without the run token', async () => {
@@ -98,6 +118,60 @@ test('the token is accepted in a header as well as a query parameter', async () 
     const res = await s.call('/api/tree', { header: true });
     assert.equal(res.status, 200);
   } finally {
+    await s.close();
+  }
+});
+
+test('opening an existing workspace preserves its frozen scan until an explicit rescan', async () => {
+  const s = await serve(TREE, {
+    prepare(root) {
+      const initialized = spawnSync(process.execPath, [CLI.pathname, 'inspect', root, '--json'], {
+        encoding: 'utf8',
+      });
+      assert.equal(initialized.status, 0, initialized.stderr);
+      writeFileSync(join(root, 'arrived.txt'), 'new');
+    },
+  });
+  try {
+    const frozen = await (await s.call('/api/tree')).json();
+    assert.ok(!frozen.scan.nodes.some((node) => node.id === 'arrived.txt'));
+
+    const refreshed = await (await s.call('/api/rescan', { method: 'POST', body: {} })).json();
+    assert.ok(refreshed.scan.nodes.some((node) => node.id === 'arrived.txt'));
+  } finally {
+    await s.close();
+  }
+});
+
+test('portable state cannot move while its browser server is running', async () => {
+  const s = await serve(TREE);
+  const destinationRoot = sandbox({});
+  const destination = join(destinationRoot, 'moved-state');
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [CLI.pathname, 'state', 'move', destination, '--data-dir', join(s.root, '.reorg')],
+      { encoding: 'utf8' }
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /being served/i);
+    assert.ok(existsSync(join(s.root, '.reorg', 'workspace.json')));
+    assert.equal(existsSync(destination), false);
+  } finally {
+    cleanup(destinationRoot);
+    await s.close();
+  }
+});
+
+test('a concurrent workspace write reports a retryable busy response', async () => {
+  const s = await serve(TREE);
+  const release = acquireWorkspaceLock(s.root);
+  try {
+    const res = await s.call('/api/revisions');
+    assert.equal(res.status, 503);
+    assert.equal((await res.json()).code, 'workspace-busy');
+  } finally {
+    release();
     await s.close();
   }
 });
@@ -206,22 +280,19 @@ test('/api/head caps how much it reads and says the result is truncated', async 
   }
 });
 
-test('without --allow-apply the server can dry-run but never mutate', async () => {
-  const s = await serve(TREE, { allowApply: false });
+test('the server can dry-run but never mutate the filesystem', async () => {
+  const s = await serve(TREE);
   try {
-    const plan = {
-      ...loadPlan(s.root),
-      overrides: [{ id: 'keep.txt', cur: { name: 'keep.txt', parentId: 'docs' } }],
-    };
+    await mutate(s, [{ type: 'move', id: 'keep.txt', parentId: 'docs' }]);
 
-    const dry = await s.call('/api/apply', { method: 'POST', body: { plan, dryRun: true } });
+    const dry = await s.call('/api/apply', { method: 'POST', body: { dryRun: true } });
     assert.equal(dry.status, 200);
     assert.equal((await dry.json()).dryRun, true);
     assert.ok(existsSync(join(s.root, 'keep.txt')), 'a dry run must not move anything');
 
-    const real = await s.call('/api/apply', { method: 'POST', body: { plan, dryRun: false } });
+    const real = await s.call('/api/apply', { method: 'POST', body: { dryRun: false } });
     assert.equal(real.status, 403);
-    assert.match((await real.json()).error, /--allow-apply/);
+    assert.match((await real.json()).error, /reorg apply --yes/);
     assert.ok(existsSync(join(s.root, 'keep.txt')), 'a refused apply must not move anything');
     assert.ok(!existsSync(join(s.root, 'docs/keep.txt')));
   } finally {
@@ -229,8 +300,31 @@ test('without --allow-apply the server can dry-run but never mutate', async () =
   }
 });
 
+test('a live server adopts the refreshed scan after an explicit CLI apply', async () => {
+  const s = await serve(TREE);
+  try {
+    const before = await (await s.call('/api/revisions')).json();
+    await mutate(s, [{ type: 'rename', id: 'keep.txt', name: 'kept.txt' }]);
+
+    const applied = spawnSync(process.execPath, [CLI.pathname, 'apply', s.root, '--yes'], {
+      encoding: 'utf8',
+    });
+    assert.equal(applied.status, 0, applied.stderr);
+
+    const after = await (await s.call('/api/revisions')).json();
+    assert.notEqual(after.scanId, before.scanId);
+    assert.equal(after.planRevision, 2);
+    const tree = await (await s.call('/api/tree')).json();
+    assert.ok(tree.scan.nodes.some((node) => node.id === 'kept.txt'));
+    assert.ok(!tree.scan.nodes.some((node) => node.id === 'keep.txt'));
+    assert.deepEqual(tree.plan.overrides, []);
+  } finally {
+    await s.close();
+  }
+});
+
 test('the apply route is reachable only as a POST', async () => {
-  const s = await serve(TREE, { allowApply: true });
+  const s = await serve(TREE);
   try {
     const res = await s.call('/api/apply');
     assert.equal(res.status, 404);
@@ -239,40 +333,16 @@ test('the apply route is reachable only as a POST', async () => {
   }
 });
 
-test('with --allow-apply the server applies and retires the plan server-side', async () => {
-  const s = await serve(TREE, { allowApply: true });
-  try {
-    const plan = {
-      ...loadPlan(s.root),
-      overrides: [{ id: 'keep.txt', cur: { name: 'keep.txt', parentId: 'docs' } }],
-    };
-    await s.call('/api/plan', { method: 'PUT', body: { plan } });
-
-    const res = await s.call('/api/apply', { method: 'POST', body: { plan, dryRun: false } });
-    assert.equal(res.status, 200);
-    assert.ok(existsSync(join(s.root, 'docs/keep.txt')));
-    assert.ok(!existsSync(join(s.root, 'keep.txt')));
-
-    // A plan left behind would make the next resolve report collisions against
-    // the tree it just created, so the server clears it rather than trusting the
-    // browser to follow up.
-    assert.deepEqual(loadPlan(s.root).overrides, []);
-  } finally {
-    await s.close();
-  }
-});
-
 test('an unresolvable plan is reported as a conflict and changes nothing', async () => {
-  const s = await serve(TREE, { allowApply: true });
+  const s = await serve(TREE);
   try {
     // Two entries landing on one path is a plan-time collision, not a move-time surprise.
-    const plan = {
-      ...loadPlan(s.root),
-      overrides: [
-        { id: 'keep.txt', cur: { name: 'note.md', parentId: 'docs' } },
-      ],
-    };
-    const res = await s.call('/api/apply', { method: 'POST', body: { plan, dryRun: false } });
+    const mutation = await mutate(s, [
+      { type: 'move', id: 'keep.txt', parentId: 'docs' },
+      { type: 'rename', id: 'keep.txt', name: 'note.md' },
+    ]);
+    assert.ok(mutation.problems.length > 0);
+    const res = await s.call('/api/apply', { method: 'POST', body: { dryRun: true } });
     assert.equal(res.status, 409);
     assert.ok((await res.json()).problems.length > 0);
     assert.ok(existsSync(join(s.root, 'keep.txt')));
@@ -284,11 +354,8 @@ test('an unresolvable plan is reported as a conflict and changes nothing', async
 test('/api/resolve reports operations without touching disk', async () => {
   const s = await serve(TREE);
   try {
-    const plan = {
-      ...loadPlan(s.root),
-      overrides: [{ id: 'keep.txt', cur: { name: 'keep.txt', parentId: 'docs' } }],
-    };
-    const res = await s.call('/api/resolve', { method: 'POST', body: { plan } });
+    await mutate(s, [{ type: 'move', id: 'keep.txt', parentId: 'docs' }]);
+    const res = await s.call('/api/resolve', { method: 'POST', body: {} });
     assert.equal(res.status, 200);
     const body = await res.json();
     assert.ok(body.ops.length > 0);
@@ -299,17 +366,86 @@ test('/api/resolve reports operations without touching disk', async () => {
   }
 });
 
-test('a saved plan is persisted and handed back by /api/tree', async () => {
+test('a semantic transaction is persisted and handed back by /api/tree', async () => {
   const s = await serve(TREE);
   try {
-    const plan = { ...loadPlan(s.root), notes: [{ id: 'keep.txt', text: 'why this stays' }] };
-    const put = await s.call('/api/plan', { method: 'PUT', body: { plan } });
-    assert.equal(put.status, 200);
-    assert.ok((await put.json()).savedAt);
+    const mutation = await mutate(s, [
+      { type: 'set-note', id: 'note:test', target: 'keep.txt', body: 'why this stays' },
+    ]);
+    assert.ok(mutation.plan.savedAt);
 
     const tree = await (await s.call('/api/tree')).json();
-    assert.deepEqual(tree.plan.notes, [{ id: 'keep.txt', text: 'why this stays' }]);
-    assert.equal(tree.allowApply, false);
+    assert.deepEqual(tree.plan.notes, [
+      { id: 'note:test', target: 'keep.txt', body: 'why this stays' },
+    ]);
+    assert.equal(Object.hasOwn(tree, 'allowApply'), false);
+  } finally {
+    await s.close();
+  }
+});
+
+test('inspect reports the exact shared view projected onto the canonical plan', async () => {
+  const s = await serve(TREE);
+  try {
+    await mutate(s, [{ type: 'move', id: 'keep.txt', parentId: 'docs' }]);
+    const view = await s.call('/api/view', {
+      method: 'PUT',
+      body: {
+        expectedRevision: 0,
+        patch: {
+          treeInitialized: true,
+          collapsed: ['docs'],
+          selectedId: 'keep.txt',
+          ui: { filterTag: 'moved', heat: true },
+          side: { mode: 'preview', targetId: 'keep.txt' },
+        },
+      },
+    });
+    assert.equal(view.status, 200);
+
+    const inspected = await (await s.call('/api/inspect')).json();
+    const selected = inspected.projection.nodes.find((node) => node.id === 'keep.txt');
+    assert.equal(inspected.plan.revision, 1);
+    assert.equal(inspected.transactions[0].actor, 'server-test');
+    assert.equal(inspected.view.revision, 1);
+    assert.equal(inspected.view.side.mode, 'preview');
+    assert.equal(inspected.view.selectedId, null);
+    assert.equal(selected.currentPath, 'docs/keep.txt');
+    assert.equal(selected.visible, false);
+    assert.equal(selected.hiddenBy, 'collapsed-ancestor');
+    assert.equal(selected.presentation.selected, false);
+    assert.equal(selected.presentation.dimmed, false);
+
+    const revisions = await (await s.call('/api/revisions')).json();
+    assert.deepEqual(
+      { planRevision: revisions.planRevision, viewRevision: revisions.viewRevision },
+      { planRevision: 1, viewRevision: 1 }
+    );
+  } finally {
+    await s.close();
+  }
+});
+
+test('whole-plan replacement is unavailable and stale transactions are rejected', async () => {
+  const s = await serve(TREE);
+  try {
+    const replacement = await s.call('/api/plan', {
+      method: 'PUT',
+      body: { plan: { overrides: [{ id: 'keep.txt', evicted: true }] } },
+    });
+    assert.equal(replacement.status, 404);
+
+    await mutate(s, [{ type: 'move', id: 'keep.txt', parentId: 'docs' }]);
+    const stale = await s.call('/api/transactions', {
+      method: 'POST',
+      body: {
+        expectedRevision: 0,
+        transactionId: 'stale-test',
+        commands: [{ type: 'rename', id: 'keep.txt', name: 'kept.txt' }],
+      },
+    });
+    assert.equal(stale.status, 409);
+    assert.equal((await stale.json()).code, 'revision-conflict');
   } finally {
     await s.close();
   }
@@ -318,12 +454,12 @@ test('a saved plan is persisted and handed back by /api/tree', async () => {
 test('malformed JSON is answered with an error, not a crashed process', async () => {
   const s = await serve(TREE);
   try {
-    const res = await fetch(`${s.base}/api/plan?token=${s.token}`, {
-      method: 'PUT',
+    const res = await fetch(`${s.base}/api/transactions?token=${s.token}`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: '{not json',
     });
-    assert.equal(res.status, 500);
+    assert.equal(res.status, 400);
     assert.ok((await res.json()).error);
 
     // Still serving afterwards.

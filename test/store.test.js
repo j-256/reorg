@@ -41,8 +41,8 @@ const file = (id, parentId = ROOT_ID, name = id.split('/').pop()) => ({ id, name
 // docs/, docs/note.md, keep.txt, old/, old/junk.log
 const TREE = [dir('docs'), file('docs/note.md', 'docs'), file('keep.txt'), dir('old'), file('old/junk.log', 'old')];
 
-function load(nodes = TREE, plan = {}) {
-  store.init({ scan: fakeScan(nodes), plan, allowApply: false, undoScripts: [] });
+function load(nodes = TREE, plan = {}, view = null) {
+  store.init({ scan: fakeScan(nodes), plan, view, undoScripts: [] });
   return store;
 }
 
@@ -142,7 +142,7 @@ test('trashing a folder cascades to everything inside it', () => {
 test('a created folder serializes under created, never overrides', () => {
   load();
   const { id } = edit.addDir(ROOT_ID);
-  assert.match(id, /^new:\d+$/);
+  assert.match(id, /^new:[0-9a-f-]{36}$/);
 
   const s = store.serialize();
   assert.deepEqual(s.overrides, []);
@@ -151,7 +151,7 @@ test('a created folder serializes under created, never overrides', () => {
   assert.deepEqual(changesOf(store.nodes.get(id)), ['new']);
 });
 
-test('created-folder ids keep incrementing across a save and reload', () => {
+test('created-folder ids remain unique across a save and reload', () => {
   // Reusing an id after reload would collide with the folder already in the plan.
   load();
   const first = edit.addDir(ROOT_ID).id;
@@ -311,14 +311,14 @@ test('collapse helpers are shallow or deep as asked', () => {
 });
 
 test('git tinting defaults on inside a repo and off outside one', () => {
-  store.init({ scan: fakeScan(TREE, { git: true }), plan: {}, allowApply: false, undoScripts: [] });
+  store.init({ scan: fakeScan(TREE, { git: true }), plan: {}, undoScripts: [] });
   assert.equal(store.ui.git, true);
 
-  store.init({ scan: fakeScan(TREE, { git: false }), plan: {}, allowApply: false, undoScripts: [] });
+  store.init({ scan: fakeScan(TREE, { git: false }), plan: {}, undoScripts: [] });
   assert.equal(store.ui.git, false);
 
   // An explicit saved preference wins over the default.
-  store.init({ scan: fakeScan(TREE, { git: true }), plan: { ui: { git: false } }, allowApply: false, undoScripts: [] });
+  store.init({ scan: fakeScan(TREE, { git: true }), plan: { ui: { git: false } }, undoScripts: [] });
   assert.equal(store.ui.git, false);
 });
 
@@ -332,24 +332,25 @@ test('theme cycles auto -> dark -> light and back', () => {
   assert.equal(edit.cycleTheme().theme, 'auto', 'the cycle returns to following the system');
 });
 
-test('auto is stored as absent, so a pre-existing plan needs no migration', () => {
+test('auto is stored as absent from shared view state', () => {
   // The CSS distinguishes "no override" from an explicit choice with
   // :not([data-theme]), so auto must not serialize as the string 'auto'.
   load();
   edit.cycleTheme(); // dark
-  assert.equal(store.serialize().ui.theme, 'dark');
+  assert.equal(store.serializeView().ui.theme, 'dark');
 
   edit.cycleTheme(); // light
   edit.cycleTheme(); // auto
-  assert.equal('theme' in store.serialize().ui, false, 'auto leaves no key behind');
+  assert.equal('theme' in store.serializeView().ui, false, 'auto leaves no key behind');
 });
 
 test('an explicit theme survives a save and reload', () => {
   load();
   edit.cycleTheme(); // dark
-  const saved = store.serialize();
+  const savedPlan = store.serialize();
+  const savedView = store.serializeView();
 
-  load(TREE, saved);
+  load(TREE, savedPlan, savedView);
   assert.equal(edit.currentTheme(), 'dark');
 });
 
@@ -370,7 +371,7 @@ function realScan(layout) {
 test('a browser-built move resolves to the move the user drew', () => {
   const { root, scan: s } = realScan({ 'keep.txt': 'x', 'docs/note.md': 'y' });
   try {
-    store.init({ scan: s, plan: {}, allowApply: false, undoScripts: [] });
+    store.init({ scan: s, plan: {}, undoScripts: [] });
     edit.moveNode('keep.txt', 'docs');
 
     const { ops, problems } = resolve(s, store.serialize());
@@ -387,7 +388,7 @@ test('a browser-built move resolves to the move the user drew', () => {
 test('a browser-created folder resolves to a mkdir plus a move into it', () => {
   const { root, scan: s } = realScan({ 'keep.txt': 'x' });
   try {
-    store.init({ scan: s, plan: {}, allowApply: false, undoScripts: [] });
+    store.init({ scan: s, plan: {}, undoScripts: [] });
     const { id } = edit.addDir(ROOT_ID);
     edit.renameNode(id, 'sorted');
     edit.moveNode('keep.txt', id);
@@ -411,7 +412,7 @@ test('a cascaded trash resolves without the kept-children problem', () => {
   // kept items.
   const { root, scan: s } = realScan({ 'old/junk.log': 'x', 'old/more.log': 'y', 'keep.txt': 'z' });
   try {
-    store.init({ scan: s, plan: {}, allowApply: false, undoScripts: [] });
+    store.init({ scan: s, plan: {}, undoScripts: [] });
     edit.toggleEvict('old');
 
     const { ops, problems } = resolve(s, store.serialize());
@@ -427,7 +428,7 @@ test('trashing only the folder, without the cascade, is what resolve rejects', (
   // implementation would produce.
   const { root, scan: s } = realScan({ 'old/junk.log': 'x', 'keep.txt': 'z' });
   try {
-    store.init({ scan: s, plan: {}, allowApply: false, undoScripts: [] });
+    store.init({ scan: s, plan: {}, undoScripts: [] });
     store.nodes.get('old').evicted = true; // deliberately no cascade
 
     const { problems } = resolve(s, store.serialize());
@@ -441,7 +442,7 @@ test('trashing only the folder, without the cascade, is what resolve rejects', (
 test('two entries renamed onto one path is caught as a collision, not applied', () => {
   const { root, scan: s } = realScan({ 'a.txt': 'x', 'b.txt': 'y' });
   try {
-    store.init({ scan: s, plan: {}, allowApply: false, undoScripts: [] });
+    store.init({ scan: s, plan: {}, undoScripts: [] });
     edit.renameNode('a.txt', 'same.txt');
     edit.renameNode('b.txt', 'same.txt');
 
@@ -455,7 +456,7 @@ test('two entries renamed onto one path is caught as a collision, not applied', 
 test('a swap the browser allows resolves through staging rather than failing', () => {
   const { root, scan: s } = realScan({ 'a.txt': 'A', 'b.txt': 'B' });
   try {
-    store.init({ scan: s, plan: {}, allowApply: false, undoScripts: [] });
+    store.init({ scan: s, plan: {}, undoScripts: [] });
     edit.renameNode('a.txt', 'tmp-name');
     edit.renameNode('b.txt', 'a.txt');
     edit.renameNode('a.txt', 'b.txt'); // id 'a.txt' now wants the name b.txt

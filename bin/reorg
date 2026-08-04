@@ -1,22 +1,71 @@
 #!/usr/bin/env node
 // reorg -- plan directory reorganizations in the browser, then apply or undo them from the CLI
 
-import { existsSync, mkdtempSync, readFileSync, statSync } from 'node:fs';
-import { join, resolve as resolvePath } from 'node:path';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { dirname, join, resolve as resolvePath } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createReorgServer } from '../src/server.js';
 import { scan, readGitignore, formatBytes } from '../src/scan.js';
-import { loadPlan, listUndoScripts, stateDir, planPath, clearAppliedPlan } from '../src/state.js';
-import { resolve as resolvePlan, describeOp } from '../src/plan.js';
+import {
+  LOCK_FILE,
+  SERVER_LEASE_FILE,
+  acquireWorkspaceLock,
+  assertWorkspaceStopped,
+  ensureWorkspace,
+  listUndoScripts,
+  loadPlan,
+  loadScan,
+  loadTransactions,
+  loadView,
+  loadWorkspace,
+  planPath,
+  recoveryDir,
+  saveScan,
+  saveWorkspace,
+  validateDataDir,
+  withWorkspaceLock,
+} from '../src/state.js';
+import {
+  buildNodes,
+  pathOf,
+  resolve as resolvePlan,
+  describeOp,
+} from '../src/plan.js';
 import { apply } from '../src/apply.js';
 import { summarize, emitPrompts, ingestSummaries, DEFAULT_MODEL } from '../src/summarize.js';
 import { analyze, ranked } from '../src/signals.js';
 import { writeStaticPlanner } from '../src/static.js';
 import { parsePlanExport } from '../web/lib/plan-file.js';
+import {
+  COMMAND_ERROR_CODE,
+  CommandError,
+  RevisionConflictError,
+  retireAppliedPlanLocked,
+  transactPlan,
+} from '../src/commands.js';
+import {
+  materializeView,
+  remapViewAfterApplyLocked,
+  transactView,
+} from '../src/view.js';
+import { collaborationSchema } from '../src/schema.js';
 
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
+const RECOVERY_ENTRY_NAMES = new Set(['history.jsonl', 'stage', 'trash']);
 
 const HELP = `reorg ${VERSION} -- plan a directory reorganization, then apply it safely.
 
@@ -31,6 +80,15 @@ USAGE
   reorg summarize [dir]          one-line AI summary per file (see SUMMARIES)
   reorg triage [dir]             rank likely-disposable entries (see TRIAGE)
   reorg status [dir]             what is planned, what is applied, what can be undone
+  reorg inspect [dir]            print the exact scan, plan, view, and effective tree
+  reorg rescan [dir]             refresh the frozen scan without changing source files
+  reorg mutate [dir]             apply semantic plan commands from JSON input
+  reorg view [dir]               update shared view state from JSON or --focus
+  reorg schema                   print the machine-readable collaboration contract
+  reorg state move DEST --data-dir SOURCE
+                                 relocate a stopped portable data directory
+  reorg state rebind NEW_ROOT --data-dir DIR
+                                 bind portable state to a relocated source tree
 
 OPTIONS
   -p, --port N       listen on N (default: first free port from 7777)
@@ -38,8 +96,13 @@ OPTIONS
   -s, --static       write and open a self-contained HTML planner, with no server
   -o, --output FILE  with --static: write FILE instead of a temporary page
   --plan FILE        with 'apply': read an exported plan; use - for stdin
-  --allow-apply      let the browser apply the plan; off by default, so the web UI
-                     can only dry-run and the destructive step stays in the terminal
+  --data-dir DIR     store portable scan, plan, view, and history outside the root
+  --input FILE       with 'mutate' or 'view': read JSON input; use - for stdin
+  --expected-revision N  reject a stale plan or view mutation
+  --transaction-id ID   idempotency key for a plan mutation
+  --actor NAME       attribution recorded with a plan mutation
+  --focus ID         with 'view': reveal and select a stable node id
+  --json             emit machine-readable output where supported
   -y, --yes          with 'apply': execute instead of dry-running
   --all              descend into everything, ignoring the collapse rules
   --no-hidden        skip dotfiles entirely
@@ -56,7 +119,7 @@ OPTIONS
 
 SUMMARIES
   Two paths, both optional:
-    reorg summarize --emit-prompts   writes .reorg/summarize.md + summaries.json.
+    reorg summarize --emit-prompts   writes summarize.md + summaries.json in the workspace.
                                      Point any coding agent at it -- no API key,
                                      no cost. Then: reorg summarize --ingest
     ANTHROPIC_API_KEY=... reorg summarize   calls the API directly and fills them in.
@@ -73,8 +136,9 @@ TRIAGE
 SAFETY
   Nothing is deleted. "Trash" moves into .reorg/trash/<run>/, recoverable by the
   undo script. Every apply writes .reorg/undo-<run>.sh before it starts, and
-  aborts entirely if the tree changed since the scan. A live plan lives in
-  .reorg/plan.json; a static plan stays in the page until you export it.
+  aborts entirely if the tree changed since the scan. The browser can change
+  planning state and run safety checks, but only reorg apply --yes moves files.
+  Shared state defaults to .reorg or moves outside the root with --data-dir.
 `;
 
 function parseArgs(argv) {
@@ -94,7 +158,6 @@ function parseArgs(argv) {
     else if (a === '-v' || a === '--version') opts.version = true;
     else if (a === '--no-open') opts.open = false;
     else if (a === '--static' || a === '-s') opts.static = true;
-    else if (a === '--allow-apply') opts.allowApply = true;
     else if (a === '--yes' || a === '-y') opts.yes = true;
     else if (a === '--all') opts.all = true;
     else if (a === '--no-hidden') opts.hidden = false;
@@ -102,6 +165,12 @@ function parseArgs(argv) {
     else if (a === '--ingest') opts.ingest = true;
     else if (a === '--force') opts.force = true;
     else if (a === '--json') opts.json = true;
+    else if (a === '--data-dir') opts.dataDir = value();
+    else if (a === '--input') opts.input = value();
+    else if (a === '--expected-revision') opts.expectedRevision = parseInt(value(), 10);
+    else if (a === '--transaction-id') opts.transactionId = value();
+    else if (a === '--actor') opts.actor = value();
+    else if (a === '--focus') opts.focus = value();
     else if (a === '--output' || a === '-o') opts.output = value();
     else if (a === '--plan') opts.planInput = value();
     else if (a === '--port' || a === '-p') opts.port = parseInt(value(), 10);
@@ -118,46 +187,217 @@ function parseArgs(argv) {
   return opts;
 }
 
-const KNOWN = new Set(['plan', 'apply', 'undo', 'summarize', 'triage', 'status', 'serve']);
+const KNOWN = new Set([
+  'plan',
+  'apply',
+  'undo',
+  'summarize',
+  'triage',
+  'status',
+  'serve',
+  'inspect',
+  'rescan',
+  'mutate',
+  'view',
+  'schema',
+  'state',
+]);
 
 function resolveRoot(candidate) {
   const root = resolvePath(candidate || '.');
-  if (!existsSync(root)) {
-    console.error(`reorg: ${root} does not exist`);
-    process.exit(1);
-  }
-  if (!statSync(root).isDirectory()) {
-    console.error(`reorg: ${root} is not a directory`);
-    process.exit(1);
-  }
+  if (!existsSync(root)) throw new Error(`${root} does not exist`);
+  if (!statSync(root).isDirectory()) throw new Error(`${root} is not a directory`);
   return root;
 }
 
 function scanOpts(opts) {
-  return {
-    all: opts.all,
-    hidden: opts.hidden,
-    maxNodes: opts.maxNodes,
-    maxDepth: opts.maxDepth,
-    collapseOver: opts.collapseOver,
-  };
+  return Object.fromEntries(
+    Object.entries({
+      all: opts.all,
+      hidden: opts.hidden,
+      maxNodes: opts.maxNodes,
+      maxDepth: opts.maxDepth,
+      collapseOver: opts.collapseOver,
+    }).filter(([, value]) => value !== undefined)
+  );
 }
 
-function readPlanInput(inputPath) {
-  if (!inputPath) throw new Error('--plan requires a file path, or - for stdin');
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function workspaceRootFromDataDir(dataDir) {
+  if (!dataDir) return null;
+  const workspace = loadWorkspace('.', dataDir);
+  return workspace ? workspace.root : null;
+}
+
+function openWorkspace(root, opts, { refresh = false } = {}) {
+  const dataDir = validateDataDir(root, opts.dataDir);
+  return withWorkspaceLock(root, dataDir, () => {
+    const workspace = ensureWorkspace(root, dataDir);
+    if (resolvePath(workspace.root) !== resolvePath(root)) {
+      throw new Error(
+        `Workspace is bound to ${workspace.root}; run reorg state rebind ${root} --data-dir ${dataDir}`
+      );
+    }
+    let frozen = loadScan(root, dataDir);
+    if (refresh || !frozen) {
+      frozen = scan(root, { ...(frozen?.options || {}), ...scanOpts(opts) });
+      saveScan(root, frozen, dataDir);
+    }
+    return { dataDir, workspace, scan: frozen };
+  });
+}
+
+function stateFiles(dir) {
+  return readdirSync(dir).filter(
+    (name) => name !== '.gitignore' && name !== LOCK_FILE && name !== SERVER_LEASE_FILE
+  );
+}
+
+function isRecoveryEntry(name) {
+  return RECOVERY_ENTRY_NAMES.has(name) || /^undo-\d+\.sh$/.test(name);
+}
+
+function copyPortableState(source, target, entries, workspace, { merge = false } = {}) {
+  const staging = `${target}.moving-${randomUUID()}`;
+  const installed = [];
+  try {
+    mkdirSync(staging, { recursive: false });
+    for (const name of entries) {
+      cpSync(join(source, name), join(staging, name), {
+        recursive: true,
+        errorOnExist: true,
+        preserveTimestamps: true,
+      });
+    }
+    const copied = loadWorkspace('.', staging);
+    if (!copied || copied.id !== workspace.id) {
+      throw new Error('The copied data directory failed workspace validation');
+    }
+    if (merge) {
+      mkdirSync(target, { recursive: true });
+      for (const name of entries) {
+        const destination = join(target, name);
+        if (existsSync(destination)) throw new Error(`${destination} already exists`);
+        renameSync(join(staging, name), destination);
+        installed.push(destination);
+      }
+      rmSync(staging, { recursive: true, force: true });
+    } else {
+      renameSync(staging, target);
+    }
+  } catch (error) {
+    for (const path of installed) rmSync(path, { recursive: true, force: true });
+    if (existsSync(staging)) rmSync(staging, { recursive: true, force: true });
+    throw error;
+  }
+
+  try {
+    for (const name of entries) rmSync(join(source, name), { recursive: true });
+  } catch (error) {
+    throw new Error(
+      `Copied reorg data to ${target}, but could not remove portable state from ${source} (${error.message})`
+    );
+  }
+}
+
+function moveWorkspaceData(sourceDir, destination) {
+  const workspace = loadWorkspace('.', sourceDir);
+  if (!workspace) throw new Error(`${sourceDir} is not a reorg workspace`);
+  const source = validateDataDir(workspace.root, sourceDir);
+  const target = validateDataDir(workspace.root, destination);
+  assertWorkspaceStopped(workspace.root, source);
+  if (source === target) throw new Error('The source and destination data directories are the same');
+  const releaseLock = acquireWorkspaceLock(workspace.root, source);
+  try {
+    assertWorkspaceStopped(workspace.root, source);
+    const lockedWorkspace = loadWorkspace('.', source);
+    if (!lockedWorkspace || lockedWorkspace.id !== workspace.id) {
+      throw new Error(`${source} changed before its move lock was acquired`);
+    }
+    const sourceIsDefault = source === recoveryDir(workspace.root);
+    const targetIsDefault = target === recoveryDir(workspace.root);
+    const sourceEntries = stateFiles(source);
+    const recoveryEntries = sourceEntries.filter(isRecoveryEntry);
+    const portableEntries = sourceEntries.filter((name) => !isRecoveryEntry(name));
+    const splitDefault = sourceIsDefault && recoveryEntries.length > 0;
+    const mergeDefault = targetIsDefault && existsSync(target);
+    if (mergeDefault) {
+      assertWorkspaceStopped(workspace.root, target);
+      if (existsSync(join(target, LOCK_FILE))) {
+        throw new Error(`Workspace is busy: ${join(target, LOCK_FILE)}`);
+      }
+      const occupied = stateFiles(target).filter((name) => !isRecoveryEntry(name));
+      if (occupied.length) throw new Error(`${target} already contains portable reorg state`);
+    } else if (existsSync(target)) {
+      throw new Error(`${target} already exists`);
+    }
+
+    mkdirSync(dirname(target), { recursive: true });
+    let method = 'rename';
+    if (splitDefault || mergeDefault) {
+      method = splitDefault ? 'split-copy' : 'merge-copy';
+      copyPortableState(source, target, portableEntries, workspace, { merge: mergeDefault });
+      if (!sourceIsDefault) rmSync(source, { recursive: true });
+    } else {
+      try {
+        renameSync(source, target);
+      } catch (e) {
+        if (e.code !== 'EXDEV') throw e;
+        method = 'copy';
+        copyPortableState(source, target, sourceEntries, workspace);
+        rmSync(source, { recursive: true });
+      }
+    }
+    const savedWorkspace = saveWorkspace(workspace.root, workspace, target);
+    return { source, destination: target, method, workspace: savedWorkspace };
+  } finally {
+    releaseLock([target]);
+  }
+}
+
+function compareRebindScan(stored, candidate) {
+  const before = new Map(stored.nodes.map((node) => [node.id, node]));
+  const after = new Map(candidate.nodes.map((node) => [node.id, node]));
+  const missing = [];
+  const added = [];
+  const changedKind = [];
+  const changedContent = [];
+  for (const [id, node] of before) {
+    if (!after.has(id)) missing.push(id);
+    else if (after.get(id).kind !== node.kind) changedKind.push(id);
+    else if (
+      after.get(id).bytes !== node.bytes ||
+      after.get(id).files !== node.files ||
+      (node.kind === 'link' && after.get(id).meta !== node.meta)
+    ) changedContent.push(id);
+  }
+  for (const id of after.keys()) if (!before.has(id)) added.push(id);
+  return { missing, added, changedKind, changedContent };
+}
+
+function readJsonInput(inputPath, flag) {
+  if (!inputPath) throw new Error(`${flag} requires a file path, or - for stdin`);
   let text;
   try {
     text = readFileSync(inputPath === '-' ? 0 : resolvePath(inputPath), 'utf8');
   } catch (e) {
     const label = inputPath === '-' ? 'stdin' : resolvePath(inputPath);
-    throw new Error(`could not read plan from ${label} (${e.message})`);
+    throw new Error(`could not read input from ${label} (${e.message})`);
   }
   let parsed;
   try {
     parsed = JSON.parse(text);
   } catch (e) {
-    throw new Error(`plan input is not valid JSON (${e.message})`);
+    throw new Error(`${flag} input is not valid JSON (${e.message})`);
   }
+  return parsed;
+}
+
+function readPlanInput(inputPath) {
+  const parsed = readJsonInput(inputPath, '--plan');
   return parsePlanExport(parsed);
 }
 
@@ -207,8 +447,18 @@ function printOps(ops, stats) {
 }
 
 function loadResolved(root, opts, imported = null) {
-  const s = imported && imported.scan ? { ...imported.scan, root } : scan(root, scanOpts(opts));
-  const plan = imported ? imported.plan : loadPlan(root);
+  const opened = imported ? null : openWorkspace(root, opts);
+  const snapshot = imported
+    ? {
+        scan: imported.scan ? { ...imported.scan, root } : scan(root, scanOpts(opts)),
+        plan: imported.plan,
+      }
+    : withWorkspaceLock(root, opened.dataDir, () => ({
+        scan: loadScan(root, opened.dataDir),
+        plan: loadPlan(root, opened.dataDir),
+      }));
+  const s = snapshot.scan;
+  const plan = snapshot.plan;
   const resolved = resolvePlan(s, plan);
   if (resolved.problems.length) {
     console.error('This plan cannot be applied as-is:\n');
@@ -216,7 +466,16 @@ function loadResolved(root, opts, imported = null) {
     console.error('\nFix it in the planner, then try again.');
     process.exit(1);
   }
-  return { ...resolved, plan };
+  return { ...resolved, plan, scan: s, dataDir: opened?.dataDir || validateDataDir(root, opts.dataDir) };
+}
+
+function appliedIdMap(scanResult, plan) {
+  const nodes = buildNodes(scanResult, plan);
+  const ids = new Map();
+  for (const node of nodes.values()) {
+    if (!node.evicted) ids.set(node.id, pathOf(nodes, node.id));
+  }
+  return ids;
 }
 
 async function main() {
@@ -231,7 +490,7 @@ async function main() {
     return;
   }
 
-  const [first, second] = opts._;
+  const [first, second, third] = opts._;
   const cmd = KNOWN.has(first) ? first : 'serve';
   if (opts.planInput && cmd !== 'apply') {
     throw new Error('--plan can only be used with reorg apply');
@@ -242,13 +501,220 @@ async function main() {
   if (opts.static && cmd !== 'serve') {
     throw new Error('--static cannot be combined with another command');
   }
-  if (opts.static && opts.allowApply) {
-    throw new Error('--allow-apply is unavailable with --static');
+  if (opts.input && cmd !== 'mutate' && cmd !== 'view') {
+    throw new Error('--input can only be used with reorg mutate or reorg view');
+  }
+  if (opts.expectedRevision !== undefined && cmd !== 'mutate' && cmd !== 'view') {
+    throw new Error('--expected-revision requires reorg mutate or reorg view');
+  }
+  if ((opts.transactionId || opts.actor) && cmd !== 'mutate') {
+    throw new Error('--transaction-id and --actor require reorg mutate');
+  }
+  if (opts.focus && cmd !== 'view') throw new Error('--focus can only be used with reorg view');
+
+  if (cmd === 'state') {
+    if (!opts.dataDir) throw new Error('reorg state requires --data-dir');
+    if (second === 'move') {
+      if (!third) throw new Error('reorg state move requires a destination');
+      const result = moveWorkspaceData(resolvePath(opts.dataDir), resolvePath(third));
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`Moved reorg data from ${result.source} to ${result.destination}`);
+      return;
+    }
+    if (second === 'rebind') {
+      if (!third) throw new Error('reorg state rebind requires a new root');
+      const dataDir = resolvePath(opts.dataDir);
+      const workspace = loadWorkspace('.', dataDir);
+      if (!workspace) throw new Error(`${dataDir} is not a reorg workspace`);
+      assertWorkspaceStopped(workspace.root, dataDir);
+      const newRoot = resolveRoot(third);
+      validateDataDir(newRoot, dataDir);
+      const result = withWorkspaceLock(newRoot, dataDir, () => {
+        const stored = loadScan(workspace.root, dataDir);
+        if (!stored) throw new Error(`${dataDir} has no frozen scan to validate`);
+        if (stored.truncated) {
+          throw new Error('A truncated frozen scan cannot safely validate a new source root');
+        }
+        const candidate = scan(newRoot, stored.options || {});
+        const differences = compareRebindScan(stored, candidate);
+        if (
+          differences.missing.length ||
+          differences.added.length ||
+          differences.changedKind.length ||
+          differences.changedContent.length
+        ) {
+          throw new Error(
+            `The new root does not match the frozen scan (${differences.missing.length} missing, ` +
+              `${differences.added.length} added, ${differences.changedKind.length} changed kind, ` +
+              `${differences.changedContent.length} changed content)`
+          );
+        }
+        const reboundScan = { ...stored, root: newRoot };
+        saveScan(newRoot, reboundScan, dataDir);
+        const reboundWorkspace = saveWorkspace(newRoot, { ...workspace, root: newRoot }, dataDir);
+        return { workspace: reboundWorkspace, scan: reboundScan };
+      });
+      if (opts.json) console.log(JSON.stringify(result, null, 2));
+      else console.log(`Rebound ${dataDir} to ${newRoot}`);
+      return;
+    }
+    throw new Error('reorg state expects move or rebind');
+  }
+
+  if (cmd === 'schema') {
+    console.log(JSON.stringify(collaborationSchema(), null, 2));
+    return;
   }
 
   const imported = opts.planInput ? readPlanInput(opts.planInput) : null;
   const rootArg = KNOWN.has(first) ? second : first;
-  const root = resolveRoot(rootArg || (imported && imported.sourceRoot) || '.');
+  const inferredWorkspaceRoot = workspaceRootFromDataDir(opts.dataDir);
+  if (!rootArg && !imported?.sourceRoot && opts.dataDir && !inferredWorkspaceRoot) {
+    throw new Error('A new --data-dir requires an explicit source directory');
+  }
+  const root = resolveRoot(
+    rootArg || imported?.sourceRoot || inferredWorkspaceRoot || '.'
+  );
+
+  // ---- inspect -----------------------------------------------------------
+  if (cmd === 'inspect') {
+    const opened = openWorkspace(root, opts);
+    const result = withWorkspaceLock(root, opened.dataDir, () => {
+      const frozen = loadScan(root, opened.dataDir);
+      const plan = loadPlan(root, opened.dataDir);
+      const view = loadView(root, opened.dataDir, plan.ui);
+      const projection = materializeView(frozen, plan, view);
+      return {
+        workspace: loadWorkspace(root, opened.dataDir),
+        dataDir: opened.dataDir,
+        scan: frozen,
+        plan,
+        transactions: loadTransactions(root, opened.dataDir),
+        view: projection.view,
+        projection: {
+          filterError: projection.filterError,
+          nodes: projection.nodes,
+        },
+        resolved: resolvePlan(frozen, plan),
+      };
+    });
+    if (opts.json) {
+      console.log(JSON.stringify(result, null, 2));
+      return;
+    }
+    const { plan, view, projection, resolved, scan: frozen } = result;
+    const visibleNodes = projection.nodes.filter((node) => node.visible);
+    console.log(`Root:          ${root}`);
+    console.log(`Data:          ${opened.dataDir}`);
+    console.log(`Workspace:     ${result.workspace.id}`);
+    console.log(`Scan:          ${frozen.id} at ${frozen.generated}`);
+    console.log(`Plan revision: ${plan.revision}`);
+    console.log(`View revision: ${view.revision}`);
+    console.log(`Visible:       ${visibleNodes.length} of ${projection.nodes.length} entries`);
+    console.log(`Pending:       ${resolved.ops.length} operation(s)`);
+    if (projection.filterError) console.log(`Filter error:  ${projection.filterError}`);
+    console.log('');
+    for (const node of visibleNodes) {
+      const tags = [
+        ...node.changes,
+        node.git && view.ui.git ? `git:${node.git}` : null,
+        node.presentation.dimmed ? 'dimmed' : null,
+        node.collapsed ? 'collapsed' : null,
+      ].filter(Boolean);
+      console.log(`${'  '.repeat(node.level - 1)}${node.kind === 'dir' ? '/' : ''}${node.currentPath}${tags.length ? `  [${tags.join(', ')}]` : ''}`);
+    }
+    return;
+  }
+
+  // ---- rescan ------------------------------------------------------------
+  if (cmd === 'rescan') {
+    const opened = openWorkspace(root, opts, { refresh: true });
+    const result = withWorkspaceLock(root, opened.dataDir, () => {
+      const frozen = loadScan(root, opened.dataDir);
+      const plan = loadPlan(root, opened.dataDir);
+      return {
+        workspace: loadWorkspace(root, opened.dataDir),
+        dataDir: opened.dataDir,
+        scan: frozen,
+        plan,
+        view: materializeView(
+          frozen,
+          plan,
+          loadView(root, opened.dataDir, plan.ui)
+        ).view,
+      };
+    });
+    if (opts.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(
+        `Refreshed ${result.scan.counts.nodes} entries at scan ${result.scan.id}`
+      );
+    }
+    return;
+  }
+
+  // ---- mutate ------------------------------------------------------------
+  if (cmd === 'mutate') {
+    const opened = openWorkspace(root, opts);
+    const input = readJsonInput(opts.input, '--input');
+    const payload = Array.isArray(input) ? { commands: input } : input;
+    if (!payload || typeof payload !== 'object') {
+      throw new Error('reorg mutate input must be a command array or transaction object');
+    }
+    const current = loadPlan(root, opened.dataDir);
+    const expectedRevision = opts.expectedRevision ?? payload.expectedRevision ?? current.revision;
+    const result = transactPlan({
+      root,
+      dataDir: opened.dataDir,
+      scan: opened.scan,
+      commands: payload.commands,
+      expectedRevision,
+      transactionId: opts.transactionId ?? payload.transactionId,
+      actor: opts.actor ?? payload.actor ?? 'cli',
+    });
+    if (opts.json) console.log(JSON.stringify(result, null, 2));
+    else {
+      console.log(
+        result.changed
+          ? `Plan revision ${result.plan.revision}: ${result.ops.length} operation(s)`
+          : `Plan revision ${result.plan.revision}: no change`
+      );
+      for (const line of result.ops.map(describeOp)) console.log(`  ${line}`);
+    }
+    return;
+  }
+
+  // ---- view --------------------------------------------------------------
+  if (cmd === 'view') {
+    const opened = openWorkspace(root, opts);
+    const plan = loadPlan(root, opened.dataDir);
+    const current = loadView(root, opened.dataDir, plan.ui);
+    const input = opts.input ? readJsonInput(opts.input, '--input') : {};
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new Error('reorg view input must be a view patch or transaction object');
+    }
+    const payload = Object.hasOwn(input, 'patch') ? input : { patch: input };
+    if (
+      payload.patch === null ||
+      typeof payload.patch !== 'object' ||
+      Array.isArray(payload.patch)
+    ) {
+      throw new Error('reorg view patch must be an object');
+    }
+    const patch = { ...payload.patch };
+    const expectedRevision = opts.expectedRevision ?? payload.expectedRevision ?? current.revision;
+    const result = transactView({
+      root,
+      dataDir: opened.dataDir,
+      expectedRevision,
+      patch,
+      legacyUi: plan.ui,
+      focusId: opts.focus ?? null,
+    });
+    if (opts.json) console.log(JSON.stringify(result, null, 2));
+    else console.log(`View revision ${result.view.revision}`);
+    return;
+  }
 
   // ---- plan --------------------------------------------------------------
   if (cmd === 'plan') {
@@ -259,7 +725,7 @@ async function main() {
 
   // ---- apply -------------------------------------------------------------
   if (cmd === 'apply') {
-    const { ops, stats, plan } = loadResolved(root, opts, imported);
+    const { ops, stats, plan, scan: frozenScan, dataDir } = loadResolved(root, opts, imported);
     if (!ops.length) {
       console.log('Nothing to apply.');
       return;
@@ -278,19 +744,49 @@ async function main() {
       return;
     }
     console.log(`Applying ${ops.length} operation(s) in ${root}:\n`);
-    const res = apply(root, ops, { dryRun: false, onLog: (l) => console.log(l) });
+    const execute = () => {
+      if (!imported) {
+        const current = loadPlan(root, dataDir);
+        if (current.revision !== plan.revision) {
+          throw new RevisionConflictError(plan.revision, current.revision);
+        }
+        const currentScan = loadScan(root, dataDir);
+        if (!currentScan || currentScan.id !== frozenScan.id) {
+          throw new CommandError('The frozen scan changed after this apply was prepared', {
+            code: COMMAND_ERROR_CODE.SCAN_CONFLICT,
+            details: { expected: frozenScan.id, actual: currentScan?.id || null },
+          });
+        }
+      }
+      const result = apply(root, ops, { dryRun: false, onLog: (l) => console.log(l) });
+      if (!imported && !result.problems.length) {
+        const idMap = appliedIdMap(frozenScan, plan);
+        retireAppliedPlanLocked({
+          root,
+          dataDir,
+          expectedRevision: plan.revision,
+          actor: 'cli-apply',
+          idMap,
+        });
+        remapViewAfterApplyLocked({ root, dataDir, idMap, legacyUi: plan.ui });
+        saveScan(root, scan(root, frozenScan.options || {}), dataDir);
+      }
+      return result;
+    };
+    const res = imported ? execute() : withWorkspaceLock(root, dataDir, execute);
     if (res.problems.length) {
       console.error('\nAborted before making any change:\n');
       for (const p of res.problems) console.error(`  - ${p}`);
       console.error('\nThe tree changed since the scan. Rescan in the planner and retry.');
       process.exit(1);
     }
-    // The plan has been realized, so retire it. Leaving it would make the next
-    // resolve see created folders both on disk and as pending, and report a
-    // collision that does not exist.
-    clearAppliedPlan(root, plan);
     console.log(`\nDone: ${res.applied} operation(s).`);
-    console.log(`Undo with:  reorg undo ${root === process.cwd() ? '' : root}`.trimEnd());
+    const undoCommand = [
+      'reorg undo',
+      root === process.cwd() ? null : shellQuote(root),
+      opts.dataDir ? `--data-dir ${shellQuote(dataDir)}` : null,
+    ].filter(Boolean).join(' ');
+    console.log(`Undo with:  ${undoCommand}`);
     console.log(`         or: bash ${res.undoPath}`);
     if (res.trashRoot && stats.trash) console.log(`Trashed items are at: ${res.trashRoot}`);
     return;
@@ -298,34 +794,48 @@ async function main() {
 
   // ---- undo --------------------------------------------------------------
   if (cmd === 'undo') {
-    const scripts = listUndoScripts(root);
-    if (!scripts.length) {
-      console.error(`reorg: no undo scripts in ${stateDir(root)}`);
-      process.exit(1);
+    const dataDir = validateDataDir(root, opts.dataDir);
+    const workspace = loadWorkspace(root, dataDir);
+    const releaseLock = workspace ? acquireWorkspaceLock(root, dataDir) : null;
+    try {
+      const scripts = listUndoScripts(root);
+      if (!scripts.length) throw new Error(`no undo scripts in ${recoveryDir(root)}`);
+      const latest = resolvePath(recoveryDir(root), scripts[0]);
+      console.log(`Running ${latest}\n`);
+      const child = spawn('bash', [latest], { stdio: 'inherit' });
+      const code = await new Promise((done, reject) => {
+        child.on('error', reject);
+        child.on('exit', (status) => done(status ?? 1));
+      });
+      if (workspace) {
+        const frozen = loadScan(root, dataDir);
+        saveScan(root, scan(root, { ...(frozen?.options || {}), ...scanOpts(opts) }), dataDir);
+        console.log('Refreshed the shared scan after undo.');
+      }
+      process.exitCode = code;
+    } finally {
+      if (releaseLock) releaseLock();
     }
-    const latest = resolvePath(stateDir(root), scripts[0]);
-    console.log(`Running ${latest}\n`);
-    const child = spawn('bash', [latest], { stdio: 'inherit' });
-    child.on('exit', (code) => process.exit(code ?? 0));
     return;
   }
 
   // ---- summarize ---------------------------------------------------------
   if (cmd === 'summarize') {
+    const opened = openWorkspace(root, opts);
     if (opts.ingest) {
-      const { added, total } = ingestSummaries(root);
+      const { added, total } = ingestSummaries(root, opened.dataDir);
       console.log(`Merged ${added} summar${added === 1 ? 'y' : 'ies'} (${total} total).`);
       console.log('Reload the planner to see them inline.');
       return;
     }
-    const s = scan(root, scanOpts(opts));
+    const s = opened.scan;
     const files = s.nodes.filter((n) => n.kind === 'file').map((n) => n.id);
     if (!files.length) {
       console.log('No files to summarize.');
       return;
     }
     if (opts.emitPrompts || !process.env.ANTHROPIC_API_KEY) {
-      const out = await emitPrompts({ root, paths: files, force: opts.force });
+      const out = await emitPrompts({ root, dataDir: opened.dataDir, paths: files, force: opts.force });
       if (!opts.emitPrompts) {
         console.log('ANTHROPIC_API_KEY is not set, so falling back to the agent path.\n');
       }
@@ -333,12 +843,19 @@ async function main() {
       console.log(`  ${out.promptPath}`);
       console.log(`  ${out.outPath}   <- the file to fill in`);
       console.log('\nNext: point your coding agent at that markdown file, then run');
-      console.log('  reorg summarize --ingest');
+      const ingestCommand = [
+        'reorg summarize',
+        root === process.cwd() ? null : shellQuote(root),
+        '--ingest',
+        opts.dataDir ? `--data-dir ${shellQuote(opened.dataDir)}` : null,
+      ].filter(Boolean).join(' ');
+      console.log(`  ${ingestCommand}`);
       return;
     }
     console.log(`Summarizing with ${opts.model || DEFAULT_MODEL}...`);
     const res = await summarize({
       root,
+      dataDir: opened.dataDir,
       paths: files,
       model: opts.model,
       force: opts.force,
@@ -352,7 +869,7 @@ async function main() {
       process.exit(1);
     }
     const n = Object.keys(res.summaries).length;
-    console.log(`Wrote ${n} summar${n === 1 ? 'y' : 'ies'} to ${planPath(root)}`);
+    console.log(`Wrote ${n} summar${n === 1 ? 'y' : 'ies'} to ${planPath(root, opened.dataDir)}`);
     if (res.usage) {
       console.log(`Tokens: ${res.usage.input_tokens} in, ${res.usage.output_tokens} out`);
     }
@@ -397,8 +914,11 @@ async function main() {
 
   // ---- status ------------------------------------------------------------
   if (cmd === 'status') {
-    const s = scan(root, scanOpts(opts));
-    const plan = loadPlan(root);
+    const opened = openWorkspace(root, opts);
+    const { scan: s, plan } = withWorkspaceLock(root, opened.dataDir, () => ({
+      scan: loadScan(root, opened.dataDir),
+      plan: loadPlan(root, opened.dataDir),
+    }));
     const { ops, problems, stats } = resolvePlan(s, plan);
     console.log(`Root:     ${root}`);
     console.log(
@@ -434,14 +954,28 @@ async function main() {
 
   // ---- static planner ----------------------------------------------------
   if (opts.static) {
-    const initial = scan(root, scanOpts(opts));
+    const opened = openWorkspace(root, opts, { refresh: true });
+    const { scan: initial, plan, view } = withWorkspaceLock(root, opened.dataDir, () => {
+      const frozen = loadScan(root, opened.dataDir);
+      const canonicalPlan = loadPlan(root, opened.dataDir);
+      return {
+        scan: frozen,
+        plan: canonicalPlan,
+        view: materializeView(
+          frozen,
+          canonicalPlan,
+          loadView(root, opened.dataDir, canonicalPlan.ui)
+        ).view,
+      };
+    });
     const output = opts.output
       ? resolvePath(opts.output)
       : join(mkdtempSync(join(tmpdir(), 'reorg-static-')), 'planner.html');
     const result = writeStaticPlanner(output, {
       root,
       scan: initial,
-      plan: loadPlan(root),
+      plan,
+      view,
       gitignore: readGitignore(root),
       undoScripts: listUndoScripts(root),
     });
@@ -464,9 +998,11 @@ async function main() {
   }
 
   // ---- serve (default) ---------------------------------------------------
+  const serverDataDir = validateDataDir(root, opts.dataDir);
   const { server, token, scan: initial } = createReorgServer({
     root,
-    allowApply: !!opts.allowApply,
+    dataDir: serverDataDir,
+    scanOptions: scanOpts(opts),
   });
   const port = await listen(server, Number.isFinite(opts.port) ? opts.port : 7777);
   const url = `http://127.0.0.1:${port}/?token=${token}`;
@@ -478,11 +1014,14 @@ async function main() {
     }${initial.truncated ? ' (truncated -- raise --max-nodes)' : ''}`
   );
   console.log(`\n  ${url}\n`);
-  if (!opts.allowApply) {
-    console.log('The browser can plan and dry-run only. To apply:');
-    console.log(`  reorg apply ${root === process.cwd() ? '' : root} --yes`.replace(/\s+/g, ' '));
-    console.log('Or restart with --allow-apply to enable the Apply button.\n');
-  }
+  console.log('The browser can plan and dry-run only. To apply:');
+  const applyCommand = [
+    'reorg apply',
+    root === process.cwd() ? null : shellQuote(root),
+    '--yes',
+    opts.dataDir ? `--data-dir ${shellQuote(serverDataDir)}` : null,
+  ].filter(Boolean).join(' ');
+  console.log(`  ${applyCommand}\n`);
   console.log('Ctrl-C to stop.');
   if (opts.open !== false) openBrowser(url);
 
@@ -496,6 +1035,14 @@ async function main() {
 }
 
 main().catch((e) => {
-  console.error(`reorg: ${e.message}`);
+  if (process.argv.slice(2).includes('--json')) {
+    console.error(JSON.stringify({
+      error: e.message,
+      ...(e.code ? { code: e.code } : {}),
+      ...(e.details || {}),
+    }));
+  } else {
+    console.error(`reorg: ${e.message}`);
+  }
   process.exit(1);
 });

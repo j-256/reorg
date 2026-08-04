@@ -76,13 +76,15 @@ test('plan exports retain the source scan and also accept a bare plan', () => {
       ...emptyPlan(),
       overrides: [{ id: 'keep.txt', cur: { name: 'renamed.txt', parentId: '.' } }],
     };
-    const exported = createPlanExport(sourceScan, plan);
+    const view = { revision: 3, selectedId: 'keep.txt', side: { mode: 'preview', targetId: 'keep.txt' } };
+    const exported = createPlanExport(sourceScan, plan, view);
     const parsed = parsePlanExport(exported);
 
     assert.equal(exported.format, PLAN_EXPORT_FORMAT);
     assert.equal(parsed.sourceRoot, root);
     assert.equal(parsed.scan, sourceScan);
     assert.equal(parsed.plan, plan);
+    assert.equal(parsed.view, view);
     assert.deepEqual(parsePlanExport(plan), { sourceRoot: null, scan: null, plan });
     assert.throws(
       () => parsePlanExport({ ...exported, format: 'something-else' }),

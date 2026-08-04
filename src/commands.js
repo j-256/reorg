@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   ROOT_ID,
   buildNodes,
@@ -7,7 +7,9 @@ import {
   resolve as resolvePlan,
 } from './plan.js';
 import {
+  findTransaction,
   loadPlan,
+  loadScan,
   logTransaction,
   savePlan,
   withWorkspaceLock,
@@ -27,8 +29,19 @@ export const COMMAND = Object.freeze({
   MERGE_SUMMARIES: 'merge-summaries',
 });
 
+export const COMMAND_ERROR_CODE = Object.freeze({
+  INVALID: 'invalid-command',
+  REVISION_CONFLICT: 'revision-conflict',
+  IDEMPOTENCY_CONFLICT: 'idempotency-conflict',
+  SCAN_CONFLICT: 'scan-conflict',
+});
+
+const INTERNAL_COMMAND = Object.freeze({
+  RETIRE_APPLIED_PLAN: 'retire-applied-plan',
+});
+
 export class CommandError extends Error {
-  constructor(message, { code = 'invalid-command', details = null } = {}) {
+  constructor(message, { code = COMMAND_ERROR_CODE.INVALID, details = null } = {}) {
     super(message);
     this.name = 'CommandError';
     this.code = code;
@@ -37,10 +50,10 @@ export class CommandError extends Error {
 }
 
 export class RevisionConflictError extends CommandError {
-  constructor(expected, actual) {
-    super(`Plan revision changed: expected ${expected}, found ${actual}`, {
-      code: 'revision-conflict',
-      details: { expected, actual },
+  constructor(expected, actual, subject = 'Plan') {
+    super(`${subject} revision changed: expected ${expected}, found ${actual}`, {
+      code: COMMAND_ERROR_CODE.REVISION_CONFLICT,
+      details: { subject: subject.toLowerCase(), expected, actual },
     });
     this.name = 'RevisionConflictError';
   }
@@ -120,6 +133,34 @@ function comparable(plan) {
     seq: plan.seq || 0,
     noteSeq: plan.noteSeq || 0,
   });
+}
+
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function transactionDigest(commands) {
+  return createHash('sha256').update(stableJson(commands)).digest('hex');
+}
+
+function checkDuplicateTransaction(root, dataDir, current, transactionId, digest) {
+  const recentDigest = current.recentTransactionDigests?.[transactionId];
+  const logged = recentDigest ? null : findTransaction(root, transactionId, dataDir);
+  if (!current.recentTransactions.includes(transactionId) && !logged) return false;
+  const previousDigest = recentDigest || (logged?.commands ? transactionDigest(logged.commands) : null);
+  if (previousDigest && previousDigest !== digest) {
+    throw new CommandError(`Transaction id ${JSON.stringify(transactionId)} was already used for different commands`, {
+      code: COMMAND_ERROR_CODE.IDEMPOTENCY_CONFLICT,
+    });
+  }
+  return true;
 }
 
 export function applyCommands(scanResult, sourcePlan, commands) {
@@ -257,7 +298,9 @@ export function applyCommands(scanResult, sourcePlan, commands) {
           id = next.id;
           state.noteSeq = next.seq;
         }
-        if (typeof id !== 'string') throw new CommandError('A note id must be a string');
+        if (typeof id !== 'string' || !id.trim()) {
+          throw new CommandError('A note id must be a non-empty string');
+        }
         if (state.notes.some((note) => note.id === id)) {
           throw new CommandError(`A note already exists with id ${JSON.stringify(id)}`);
         }
@@ -294,7 +337,10 @@ export function applyCommands(scanResult, sourcePlan, commands) {
         throw new CommandError('merge-summaries requires a summaries object');
       }
       for (const [id, summary] of Object.entries(command.summaries)) {
-        if (typeof summary === 'string' && summary.trim()) state.summaries[id] = summary.trim();
+        if (!id || typeof summary !== 'string' || !summary.trim()) {
+          throw new CommandError('Summary ids and values must be non-empty strings');
+        }
+        state.summaries[id] = summary.trim();
       }
       results.push({ type: command.type, changed: true });
       continue;
@@ -318,30 +364,69 @@ export function transactPlan({
   actor = 'cli',
 }) {
   return withWorkspaceLock(root, dataDir, () => {
+    if (typeof transactionId !== 'string' || !transactionId.trim()) {
+      throw new CommandError('transactionId must be a non-empty string');
+    }
+    if (typeof actor !== 'string' || !actor.trim()) {
+      throw new CommandError('actor must be a non-empty string');
+    }
+    if (!Array.isArray(commands) || !commands.length) {
+      throw new CommandError('A transaction requires at least one command');
+    }
+    const frozen = loadScan(root, dataDir) || scan;
+    if (!frozen || !Array.isArray(frozen.nodes)) {
+      throw new CommandError('A frozen scan is required before changing the plan');
+    }
     const current = loadPlan(root, dataDir);
-    if (current.recentTransactions.includes(transactionId)) {
+    const digest = transactionDigest(commands);
+    if (checkDuplicateTransaction(root, dataDir, current, transactionId, digest)) {
       return {
         duplicate: true,
         changed: false,
         transactionId,
         plan: current,
-        ...resolvePlan(scan, current),
+        ...resolvePlan(frozen, current),
       };
     }
-    if (!Number.isInteger(expectedRevision)) {
-      throw new CommandError('expectedRevision must be an integer');
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new CommandError('expectedRevision must be a non-negative integer');
     }
     if (current.revision !== expectedRevision) {
       throw new RevisionConflictError(expectedRevision, current.revision);
     }
 
-    const result = applyCommands(scan, current, commands);
+    const result = applyCommands(frozen, current, commands);
     if (!result.changed) {
+      const saved = savePlan(
+        root,
+        {
+          ...current,
+          recentTransactions: [...current.recentTransactions, transactionId],
+          recentTransactionDigests: {
+            ...current.recentTransactionDigests,
+            [transactionId]: digest,
+          },
+        },
+        dataDir
+      );
+      logTransaction(
+        root,
+        {
+          at: saved.savedAt,
+          transactionId,
+          actor,
+          fromRevision: current.revision,
+          toRevision: current.revision,
+          commands,
+          changed: false,
+        },
+        dataDir
+      );
       return {
         duplicate: false,
         changed: false,
         transactionId,
-        plan: current,
+        plan: saved,
         ...result.resolved,
         results: result.results,
       };
@@ -351,6 +436,10 @@ export function transactPlan({
       ...result.plan,
       revision: current.revision + 1,
       recentTransactions: [...current.recentTransactions, transactionId],
+      recentTransactionDigests: {
+        ...current.recentTransactionDigests,
+        [transactionId]: digest,
+      },
     };
     const saved = savePlan(root, next, dataDir);
     logTransaction(
@@ -374,4 +463,70 @@ export function transactPlan({
       results: result.results,
     };
   });
+}
+
+export function retireAppliedPlanLocked({
+  root,
+  dataDir = null,
+  expectedRevision,
+  transactionId = randomUUID(),
+  actor = 'apply',
+  idMap = new Map(),
+}) {
+  if (typeof transactionId !== 'string' || !transactionId.trim()) {
+    throw new CommandError('transactionId must be a non-empty string');
+  }
+  if (typeof actor !== 'string' || !actor.trim()) {
+    throw new CommandError('actor must be a non-empty string');
+  }
+  const current = loadPlan(root, dataDir);
+  const commands = [{ type: INTERNAL_COMMAND.RETIRE_APPLIED_PLAN }];
+  const digest = transactionDigest(commands);
+  if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+    throw new CommandError('expectedRevision must be a non-negative integer');
+  }
+  if (current.revision !== expectedRevision) {
+    throw new RevisionConflictError(expectedRevision, current.revision);
+  }
+
+  const remapId = (id) => idMap.get(id) || id;
+  const summaries = {};
+  for (const [id, summary] of Object.entries(current.summaries || {})) {
+    summaries[remapId(id)] = summary;
+  }
+  const next = savePlan(
+    root,
+    {
+      ...current,
+      overrides: [],
+      created: [],
+      ui: {},
+      notes: current.notes.map((note) => ({ ...note, target: remapId(note.target) })),
+      summaries,
+      revision: current.revision + 1,
+      recentTransactions: [...current.recentTransactions, transactionId],
+      recentTransactionDigests: {
+        ...current.recentTransactionDigests,
+        [transactionId]: digest,
+      },
+    },
+    dataDir
+  );
+  logTransaction(
+    root,
+    {
+      at: next.savedAt,
+      transactionId,
+      actor,
+      fromRevision: current.revision,
+      toRevision: next.revision,
+      commands,
+    },
+    dataDir
+  );
+  return { duplicate: false, changed: true, transactionId, plan: next };
+}
+
+export function retireAppliedPlan(options) {
+  return withWorkspaceLock(options.root, options.dataDir, () => retireAppliedPlanLocked(options));
 }

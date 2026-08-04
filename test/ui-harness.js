@@ -27,13 +27,12 @@ export async function closeBrowser() {
 /**
  * Boot a planner against `layout` and hand back a page plus helpers.
  *
- * opts.allowApply   let the browser apply (default false, matching the CLI)
  * opts.colorScheme  emulate an OS theme preference
  * opts.viewport     override the desktop viewport
  */
 export async function planner(layout, opts = {}) {
   const root = sandbox(layout);
-  const { server, token } = createReorgServer({ root, allowApply: !!opts.allowApply });
+  const { server, token } = createReorgServer({ root });
   await new Promise((done) => server.listen(0, '127.0.0.1', done));
   const base = `http://127.0.0.1:${server.address().port}`;
 
@@ -68,12 +67,13 @@ export async function planner(layout, opts = {}) {
       return (await res.json()).plan;
     },
 
-    /** Resolve the current in-page plan into operations, without touching disk. */
+    /** Resolve the canonical saved plan into operations, without touching disk */
     async resolved() {
       return page.evaluate(async () => {
-        const { store } = await import('/lib/store.js');
+        const { flushPlan } = await import('/app.js');
         const { api } = await import('/lib/api.js');
-        return api.post('/api/resolve', { plan: store.serialize() });
+        await flushPlan();
+        return api.post('/api/resolve', {});
       });
     },
 

@@ -1,13 +1,10 @@
-// Plan persistence.
+// Portable workspace persistence
 //
-// Everything the user does lives in <root>/.reorg/plan.json -- a diff against the
-// scan, not a copy of it. Only divergence is stored (moved/renamed/evicted nodes,
-// dirs created in the planner, notes), which keeps the file small and lets it
-// survive a rescan: a node that moved away simply won't match, and created dirs
-// carry their own definition.
+// The manifest, frozen scan, semantic plan, shared view, and transaction log live
+// together under .reorg by default or under an explicit external data directory
 //
-// .reorg/ is state, never source. It is git-ignored on first write and excluded
-// from the scan, so planning a repo's own layout does not dirty that repo.
+// Apply recovery always stays under the reorganized root so undo scripts and
+// staged or trashed entries remain attached to the filesystem they can restore
 
 import {
   readFileSync,
@@ -17,12 +14,13 @@ import {
   existsSync,
   appendFileSync,
   readdirSync,
+  realpathSync,
   openSync,
   closeSync,
   unlinkSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 
 export const STATE_DIR = '.reorg';
 export const PLAN_FILE = 'plan.json';
@@ -34,7 +32,17 @@ export const VIEW_FILE = 'view.json';
 export const VIEW_VERSION = 1;
 export const TRANSACTION_LOG_FILE = 'transactions.jsonl';
 export const LOCK_FILE = 'workspace.lock';
+export const SERVER_LEASE_FILE = 'server.lock';
 export const RECENT_TRANSACTION_LIMIT = 100;
+export const WORKSPACE_BUSY_CODE = 'workspace-busy';
+
+export class WorkspaceBusyError extends Error {
+  constructor(path) {
+    super(`Workspace is busy: ${path}`);
+    this.name = 'WorkspaceBusyError';
+    this.code = WORKSPACE_BUSY_CODE;
+  }
+}
 
 export function stateDir(root, dataDir = null) {
   return dataDir ? resolvePath(dataDir) : join(root, STATE_DIR);
@@ -44,10 +52,22 @@ export function recoveryDir(root) {
   return join(root, STATE_DIR);
 }
 
+function realLocation(path) {
+  let cursor = path;
+  const missing = [];
+  while (!existsSync(cursor)) {
+    const parent = dirname(cursor);
+    if (parent === cursor) break;
+    missing.unshift(basename(cursor));
+    cursor = parent;
+  }
+  return resolvePath(realpathSync(cursor), ...missing);
+}
+
 export function validateDataDir(root, dataDir = null) {
   const rootAbs = resolvePath(root);
   const dir = stateDir(rootAbs, dataDir);
-  const rel = relative(rootAbs, dir);
+  const rel = relative(realLocation(rootAbs), realLocation(dir));
   const isDefault = dir === recoveryDir(rootAbs);
   if (rel === '') {
     throw new Error('The reorganized directory itself cannot be used as --data-dir');
@@ -87,6 +107,7 @@ export function emptyPlan() {
     ui: {},
     revision: 0,
     recentTransactions: [],
+    recentTransactionDigests: {},
   };
 }
 
@@ -144,6 +165,9 @@ export function loadPlan(root, dataDir = null) {
     throw new Error(`${p} has an invalid revision`);
   }
   if (!Array.isArray(plan.recentTransactions)) plan.recentTransactions = [];
+  if (!plan.recentTransactionDigests || typeof plan.recentTransactionDigests !== 'object') {
+    plan.recentTransactionDigests = {};
+  }
   return plan;
 }
 
@@ -159,6 +183,11 @@ export function savePlan(root, plan, dataDir = null) {
     throw new Error('Cannot save a plan with an invalid revision');
   }
   out.recentTransactions = (out.recentTransactions || []).slice(-RECENT_TRANSACTION_LIMIT);
+  out.recentTransactionDigests = Object.fromEntries(
+    out.recentTransactions
+      .filter((id) => typeof out.recentTransactionDigests?.[id] === 'string')
+      .map((id) => [id, out.recentTransactionDigests[id]])
+  );
   writeJsonAtomic(planPath(root, dataDir), out);
   return out;
 }
@@ -215,7 +244,14 @@ export function loadWorkspace(root, dataDir = null) {
   const p = workspacePath(root, dataDir);
   if (!existsSync(p)) return null;
   const value = readJson(p, 'workspace');
-  if (value.format !== 'reorg-workspace' || value.version !== WORKSPACE_VERSION || !value.id) {
+  if (
+    value.format !== 'reorg-workspace' ||
+    value.version !== WORKSPACE_VERSION ||
+    typeof value.id !== 'string' ||
+    !value.id ||
+    typeof value.root !== 'string' ||
+    !value.root
+  ) {
     throw new Error(`${p} has an unsupported workspace format`);
   }
   return value;
@@ -250,27 +286,149 @@ export function saveWorkspace(root, workspace, dataDir = null) {
   return out;
 }
 
-export function withWorkspaceLock(root, dataDir, fn) {
+export function acquireWorkspaceLock(root, dataDir = null) {
   const dir = ensureStateDir(root, dataDir);
   const path = join(dir, LOCK_FILE);
-  let fd;
-  try {
-    fd = openSync(path, 'wx', 0o600);
-  } catch (e) {
-    if (e.code === 'EEXIST') throw new Error(`Workspace is busy: ${path}`);
-    throw e;
+  const lease = { token: randomUUID(), pid: process.pid };
+  let fd = null;
+  let acquired = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      fd = openSync(path, 'wx', 0o600);
+      writeFileSync(fd, JSON.stringify(lease));
+      closeSync(fd);
+      fd = null;
+      acquired = true;
+      break;
+    } catch (error) {
+      const created = fd !== null;
+      if (fd !== null) closeSync(fd);
+      fd = null;
+      if (error.code !== 'EEXIST') {
+        if (created && existsSync(path)) unlinkSync(path);
+        throw error;
+      }
+      let existing;
+      try {
+        existing = JSON.parse(readFileSync(path, 'utf8'));
+      } catch {
+        throw new WorkspaceBusyError(path);
+      }
+      if (Number.isInteger(existing.pid) && existing.pid > 0 && !processIsRunning(existing.pid)) {
+        unlinkSync(path);
+        continue;
+      }
+      throw new WorkspaceBusyError(path);
+    }
   }
+  if (!acquired) throw new WorkspaceBusyError(path);
+  return (additionalDataDirs = []) => {
+    const candidates = [dir, ...additionalDataDirs.map((candidate) => stateDir(root, candidate))];
+    for (const candidate of new Set(candidates)) {
+      const candidatePath = join(candidate, LOCK_FILE);
+      try {
+        const current = JSON.parse(readFileSync(candidatePath, 'utf8'));
+        if (current.token === lease.token) unlinkSync(candidatePath);
+      } catch {
+        // The lock was already removed or replaced
+      }
+    }
+  };
+}
+
+export function withWorkspaceLock(root, dataDir, fn) {
+  const release = acquireWorkspaceLock(root, dataDir);
   try {
     return fn();
   } finally {
-    closeSync(fd);
-    unlinkSync(path);
+    release();
   }
+}
+
+function processIsRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (error.code === 'ESRCH') return false;
+    if (error.code === 'EPERM') return true;
+    throw error;
+  }
+}
+
+export function assertWorkspaceStopped(root, dataDir = null) {
+  const path = join(stateDir(root, dataDir), SERVER_LEASE_FILE);
+  if (!existsSync(path)) return;
+  let lease;
+  try {
+    lease = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    throw new Error(`Workspace has an unreadable server lease: ${path}`);
+  }
+  if (Number.isInteger(lease.pid) && lease.pid > 0 && processIsRunning(lease.pid)) {
+    throw new Error(`Workspace is being served by process ${lease.pid}`);
+  }
+  unlinkSync(path);
+}
+
+export function acquireServerLease(root, dataDir = null) {
+  const dir = ensureStateDir(root, dataDir);
+  assertWorkspaceStopped(root, dir);
+  const path = join(dir, SERVER_LEASE_FILE);
+  const lease = {
+    token: randomUUID(),
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+  };
+  let fd;
+  try {
+    fd = openSync(path, 'wx', 0o600);
+    writeFileSync(fd, JSON.stringify(lease));
+  } catch (error) {
+    const created = fd !== undefined;
+    if (fd !== undefined) closeSync(fd);
+    if (created && existsSync(path)) unlinkSync(path);
+    if (error.code === 'EEXIST') throw new Error(`Workspace is already being served: ${path}`);
+    throw error;
+  }
+  closeSync(fd);
+  return () => {
+    try {
+      const current = JSON.parse(readFileSync(path, 'utf8'));
+      if (current.token === lease.token) unlinkSync(path);
+    } catch {
+      // The lease was already removed or replaced
+    }
+  };
 }
 
 export function logTransaction(root, entry, dataDir = null) {
   ensureStateDir(root, dataDir);
   appendFileSync(join(stateDir(root, dataDir), TRANSACTION_LOG_FILE), JSON.stringify(entry) + '\n');
+}
+
+export function loadTransactions(root, dataDir = null, limit = 100) {
+  const path = join(stateDir(root, dataDir), TRANSACTION_LOG_FILE);
+  if (!existsSync(path)) return [];
+  const lines = readFileSync(path, 'utf8').split(/\r?\n/).filter(Boolean);
+  const first = Math.max(0, lines.length - limit);
+  return lines.slice(first).map((line, index) => {
+    try {
+      return JSON.parse(line);
+    } catch (error) {
+      throw new Error(
+        `${path} contains an invalid transaction record near line ${first + index + 1} (${error.message})`
+      );
+    }
+  });
+}
+
+export function findTransaction(root, transactionId, dataDir = null) {
+  const entries = loadTransactions(root, dataDir, Number.MAX_SAFE_INTEGER);
+  for (let index = entries.length - 1; index >= 0; index--) {
+    if (entries[index].transactionId === transactionId) return entries[index];
+  }
+  return null;
 }
 
 /**

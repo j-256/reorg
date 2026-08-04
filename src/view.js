@@ -1,6 +1,9 @@
 import { buildNodes, changesOf, childrenOf, pathOf, ROOT_ID } from './plan.js';
 import {
+  loadPlan,
+  loadScan,
   loadView,
+  savePlan,
   saveView,
   withWorkspaceLock,
 } from './state.js';
@@ -16,6 +19,18 @@ export const SIDE_MODE = Object.freeze({
 });
 
 const SIDE_MODES = new Set(Object.values(SIDE_MODE));
+const FILTER_TAGS = new Set(['moved', 'renamed', 'new', 'trashed']);
+const THEMES = new Set(['auto', 'dark', 'light']);
+const VIEW_PATCH_FIELDS = new Set(['ui', 'treeInitialized', 'collapsed', 'selectedId', 'side']);
+const UI_FIELDS = new Set(['filterText', 'filterTag', 'git', 'heat', 'theme', 'sideW']);
+const SIDE_FIELDS = new Set(['mode', 'targetId']);
+
+function rejectUnknownFields(value, allowed, label) {
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key));
+  if (unknown.length) {
+    throw new CommandError(`Unknown ${label} field: ${JSON.stringify(unknown[0])}`);
+  }
+}
 
 function parsedRegex(text) {
   const query = (text || '').trim();
@@ -147,7 +162,7 @@ export function materializeView(scanResult, plan, sourceView = {}) {
       hiddenBy,
       collapsedAncestor,
       presentation: {
-        selected: view.selectedId === node.id,
+        selected: view.selectedId === node.id && hiddenBy === null,
         dimmed,
         dimmedBecause: dimmed ? `active change filter is ${view.ui.filterTag}` : null,
         gitLayerEnabled: !!view.ui.git,
@@ -166,11 +181,23 @@ export function materializeView(scanResult, plan, sourceView = {}) {
 
   for (const child of childrenOf(nodes, ROOT_ID)) visit(child, 1);
 
+  const selectedId = projected.some((node) => node.id === view.selectedId && node.visible)
+    ? view.selectedId
+    : null;
+  const side =
+    view.side.mode === SIDE_MODE.PREVIEW && !nodes.has(view.side.targetId)
+      ? { mode: SIDE_MODE.NONE, targetId: null }
+      : view.side;
+
   return {
     view: {
       ...view,
       treeInitialized: true,
-      collapsed: [...collapsed].sort(),
+      collapsed: [...collapsed]
+        .filter((id) => nodes.get(id)?.kind === 'dir')
+        .sort(),
+      selectedId,
+      side,
     },
     filterError: filterError(view.ui.filterText),
     nodes: projected,
@@ -182,6 +209,21 @@ function normalizeViewPatch(current, patch) {
   if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
     throw new CommandError('A view update must be an object');
   }
+  rejectUnknownFields(patch, VIEW_PATCH_FIELDS, 'view');
+  if (
+    patch.ui !== undefined &&
+    (!patch.ui || typeof patch.ui !== 'object' || Array.isArray(patch.ui))
+  ) {
+    throw new CommandError('View ui must be an object');
+  }
+  if (
+    patch.side !== undefined &&
+    (!patch.side || typeof patch.side !== 'object' || Array.isArray(patch.side))
+  ) {
+    throw new CommandError('View side must be an object');
+  }
+  if (patch.ui) rejectUnknownFields(patch.ui, UI_FIELDS, 'view ui');
+  if (patch.side) rejectUnknownFields(patch.side, SIDE_FIELDS, 'view side');
   const next = {
     ...current,
     ...patch,
@@ -191,26 +233,107 @@ function normalizeViewPatch(current, patch) {
   if (!Array.isArray(next.collapsed) || next.collapsed.some((id) => typeof id !== 'string')) {
     throw new CommandError('View collapsed ids must be strings');
   }
+  if (typeof next.treeInitialized !== 'boolean') {
+    throw new CommandError('View treeInitialized must be a boolean');
+  }
   if (next.selectedId !== null && typeof next.selectedId !== 'string') {
     throw new CommandError('View selectedId must be a string or null');
   }
   if (!SIDE_MODES.has(next.side.mode)) {
     throw new CommandError(`Unknown side mode: ${JSON.stringify(next.side.mode)}`);
   }
+  if (next.side.targetId !== null && typeof next.side.targetId !== 'string') {
+    throw new CommandError('View side targetId must be a string or null');
+  }
+  if (next.side.mode !== SIDE_MODE.PREVIEW) next.side.targetId = null;
+  if (next.ui.filterText != null && typeof next.ui.filterText !== 'string') {
+    throw new CommandError('View filterText must be a string');
+  }
+  if (next.ui.filterTag != null && !FILTER_TAGS.has(next.ui.filterTag)) {
+    throw new CommandError(`Unknown view filterTag: ${JSON.stringify(next.ui.filterTag)}`);
+  }
+  for (const key of ['git', 'heat']) {
+    if (next.ui[key] != null && typeof next.ui[key] !== 'boolean') {
+      throw new CommandError(`View ${key} must be a boolean`);
+    }
+  }
+  if (next.ui.theme != null && !THEMES.has(next.ui.theme)) {
+    throw new CommandError(`Unknown view theme: ${JSON.stringify(next.ui.theme)}`);
+  }
+  if (
+    next.ui.sideW != null &&
+    (!Number.isFinite(next.ui.sideW) || next.ui.sideW < 20 || next.ui.sideW > 80)
+  ) {
+    throw new CommandError('View sideW must be a number from 20 through 80');
+  }
   return next;
 }
 
-export function transactView({ root, dataDir = null, expectedRevision, patch }) {
+export function transactView({
+  root,
+  dataDir = null,
+  expectedRevision,
+  patch,
+  legacyUi = null,
+  focusId = null,
+}) {
   return withWorkspaceLock(root, dataDir, () => {
-    const current = loadView(root, dataDir);
-    if (!Number.isInteger(expectedRevision)) {
-      throw new CommandError('expectedRevision must be an integer');
+    const plan = loadPlan(root, dataDir);
+    const inheritedUi = legacyUi ?? plan.ui;
+    const current = loadView(root, dataDir, inheritedUi);
+    if (!Number.isInteger(expectedRevision) || expectedRevision < 0) {
+      throw new CommandError('expectedRevision must be a non-negative integer');
     }
     if (current.revision !== expectedRevision) {
-      throw new RevisionConflictError(expectedRevision, current.revision);
+      throw new RevisionConflictError(expectedRevision, current.revision, 'View');
     }
-    const next = normalizeViewPatch(current, patch);
-    const saved = saveView(root, { ...next, revision: current.revision + 1 }, dataDir);
+    const frozen = loadScan(root, dataDir);
+    let requestedPatch = patch;
+    if (focusId !== null) {
+      if (typeof focusId !== 'string' || !focusId) {
+        throw new CommandError('focusId must be a non-empty string');
+      }
+      if (!frozen) throw new CommandError('A frozen scan is required before focusing a node');
+      const nodes = buildNodes(frozen, plan);
+      const target = nodes.get(focusId);
+      if (!target) throw new CommandError(`No node exists with id ${JSON.stringify(focusId)}`);
+      const collapsed = new Set(materializeView(frozen, plan, current).view.collapsed);
+      let parent = nodes.get(target.cur.parentId);
+      const seen = new Set();
+      while (parent && !seen.has(parent.id)) {
+        seen.add(parent.id);
+        collapsed.delete(parent.id);
+        parent = nodes.get(parent.cur.parentId);
+      }
+      requestedPatch = {
+        ...patch,
+        treeInitialized: true,
+        collapsed: [...collapsed],
+        selectedId: focusId,
+        ui: { ...(patch.ui || {}), filterText: '' },
+      };
+    }
+    const next = normalizeViewPatch(current, requestedPatch);
+    const effective = frozen ? materializeView(frozen, plan, next).view : next;
+    const saved = saveView(root, { ...effective, revision: current.revision + 1 }, dataDir);
+    if (Object.keys(plan.ui || {}).length) savePlan(root, { ...plan, ui: {} }, dataDir);
     return { view: saved };
   });
+}
+
+export function remapViewAfterApplyLocked({ root, dataDir = null, idMap, legacyUi = {} }) {
+  const current = loadView(root, dataDir, legacyUi);
+  const remap = (id) => (id == null ? null : idMap.get(id) || null);
+  const sideTarget = remap(current.side.targetId);
+  const next = {
+    ...current,
+    revision: current.revision + 1,
+    collapsed: current.collapsed.map((id) => remap(id)).filter(Boolean),
+    selectedId: remap(current.selectedId),
+    side:
+      current.side.mode === SIDE_MODE.PREVIEW && !sideTarget
+        ? { mode: SIDE_MODE.NONE, targetId: null }
+        : { ...current.side, targetId: sideTarget },
+  };
+  return saveView(root, next, dataDir);
 }

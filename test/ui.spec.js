@@ -13,9 +13,23 @@
 
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { existsSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { planner, dragRow, selectRow, closeBrowser } from './ui-harness.js';
 
 after(closeBrowser);
+
+const CLI = new URL('../bin/reorg', import.meta.url);
+
+function runCliJson(args, input = undefined) {
+  const result = spawnSync(process.execPath, [CLI.pathname, ...args, '--json'], {
+    encoding: 'utf8',
+    input,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
 
 const TREE = {
   'keep.txt': 'keep me',
@@ -622,31 +636,79 @@ test('a plan survives a reload', async () => {
   }
 });
 
+test('CLI agent edits and browser presentation converge on the same inspectable state', async () => {
+  const p = await planner(TREE, { colorScheme: 'light' });
+  try {
+    const mutation = runCliJson(
+      ['mutate', p.root, '--input', '-'],
+      JSON.stringify([{ type: 'move', id: 'keep.txt', parentId: 'docs' }])
+    );
+    assert.equal(mutation.plan.revision, 1);
+    await p.page.waitForFunction(async () => {
+      const { store } = await import('/lib/store.js');
+      return store.planRevision === 1 && store.nodes.get('keep.txt')?.cur.parentId === 'docs';
+    });
+
+    writeFileSync(join(p.root, 'arrived.txt'), 'new');
+    const rescanned = runCliJson(['rescan', p.root]);
+    await p.page.waitForFunction(async (scanId) => {
+      const { store } = await import('/lib/store.js');
+      return store.scan.id === scanId && store.nodes.has('arrived.txt');
+    }, rescanned.scan.id);
+
+    await p.page.locator('.btn[data-theme-btn]').click();
+    await selectRow(p.page, 'keep.txt');
+    await p.settled();
+
+    const inspected = runCliJson(['inspect', '--data-dir', join(p.root, '.reorg')]);
+    const selected = inspected.projection.nodes.find((node) => node.id === 'keep.txt');
+    assert.equal(inspected.plan.revision, 1);
+    assert.equal(inspected.view.ui.theme, 'dark');
+    assert.equal(inspected.view.selectedId, 'keep.txt');
+    assert.deepEqual(inspected.view.side, { mode: 'preview', targetId: 'keep.txt' });
+    assert.equal(selected.currentPath, 'docs/keep.txt');
+    assert.equal(selected.presentation.selected, true);
+    assert.equal(selected.visible, true);
+    assert.ok(existsSync(join(p.root, 'keep.txt')));
+    assert.equal(existsSync(join(p.root, 'docs/keep.txt')), false);
+
+    await p.page.reload();
+    await p.page.waitForSelector('pre.head');
+    assert.equal(await p.page.locator('.btn[data-theme-btn]').textContent(), 'theme: dark');
+    assert.equal(await p.page.locator('#sideTitle').textContent(), 'preview');
+    assert.equal(
+      await p.page.locator('[role="treeitem"][aria-selected="true"]').getAttribute('data-id'),
+      'keep.txt'
+    );
+  } finally {
+    await p.close();
+  }
+});
+
 /* ---------------------------------------------------------------- apply gate */
 
-test('without --allow-apply the browser cannot apply, and says why', async () => {
-  const p = await planner(TREE, { allowApply: false });
+test('the browser cannot apply filesystem changes, and points to the CLI', async () => {
+  const p = await planner(TREE);
   try {
     await dragRow(p.page, 'keep.txt', 'docs', 'into');
     const res = await p.page.evaluate(async () => {
-      const { store } = await import('/lib/store.js');
       const { api } = await import('/lib/api.js');
       try {
-        await api.post('/api/apply', { plan: store.serialize(), dryRun: false });
+        await api.post('/api/apply', { dryRun: false });
         return { ok: true };
       } catch (e) {
         return { ok: false, message: String(e.message || e) };
       }
     });
     assert.equal(res.ok, false);
-    assert.match(res.message, /--allow-apply/);
+    assert.match(res.message, /reorg apply --yes/);
   } finally {
     await p.close();
   }
 });
 
 test('a safety check keeps the reviewed operations and next actions visible', async () => {
-  const p = await planner(TREE, { allowApply: false });
+  const p = await planner(TREE);
   try {
     await dragRow(p.page, 'keep.txt', 'docs', 'into');
     await p.page.getByRole('button', { name: 'review plan', exact: true }).click();

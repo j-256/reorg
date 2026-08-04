@@ -91,6 +91,8 @@ test('the self-contained page plans, previews, reviews, and exports without a se
       payload.plan.created.find((item) => item.cur.name === 'archive').cur,
       { name: 'archive', parentId: '.' }
     );
+    assert.equal(payload.view.selectedId, 'keep.txt');
+    assert.deepEqual(payload.view.side, { mode: 'review', targetId: null });
     assert.equal(await page.locator('#saveState').textContent(), 'plan exported');
     assert.deepEqual(errors, []);
   } finally {

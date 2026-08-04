@@ -4,6 +4,7 @@ import { store, ROOT_ID, childrenOf, isDir, changesOf, pathOf } from './store.js
 import { el, showMenu, toast } from './dom.js';
 import {
   markDirty,
+  markViewDirty,
   toggleCollapse,
   toggleEvict,
   openCreateFolderDialog,
@@ -18,6 +19,7 @@ import {
   fmtBytes,
 } from '../app.js';
 import { showPreview } from './side.js';
+import { PLAN_COMMAND } from './plan-edit.js';
 
 const TWIST = { closed: '\u25b8', open: '\u25be' };
 // Directories get no type glyph: the trailing "/" and the twist already mark them.
@@ -303,7 +305,8 @@ function openRowMenu(row, item, n, x, y) {
       'undo changes to this entry',
       () => {
         n.cur = { ...n.orig };
-        markDirty();
+        n.evicted = false;
+        markDirty({ type: PLAN_COMMAND.RESTORE_ENTRY, id: n.id });
       },
     ]);
   }
@@ -327,6 +330,7 @@ export function selectTreeNode(id, { focus = false } = {}) {
     if (row) row.classList.toggle('sel', selected);
   }
   store.selectedId = id;
+  markViewDirty();
   renderDelta();
   if (focus) item.focus({ preventScroll: true });
   item.scrollIntoView({ block: 'nearest' });
@@ -367,6 +371,7 @@ export function revealNode(id) {
     box.setAttribute('aria-invalid', 'false');
     document.getElementById('filterStatus').textContent = '';
   }
+  markViewDirty();
   renderAll();
   requestAnimationFrame(() => {
     const row = document.querySelector(`.row[data-id="${cssEsc(id)}"]`);

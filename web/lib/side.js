@@ -11,11 +11,13 @@ import {
   editNote,
   deleteNote,
   addNote,
-  runApply,
+  runSafetyCheck,
   fmtBytes,
   toggleEvict,
   downloadPlan,
   copyPlan,
+  flushPlan,
+  markViewDirty,
 } from '../app.js';
 import { revealNode } from './tree.js';
 import { PLAN_EXPORT_FILENAME } from './plan-file.js';
@@ -34,6 +36,7 @@ let previewId = null;
 let previewData = null;
 let reviewData = null;
 let lastTrigger = null;
+let restoringView = false;
 
 const $ = (s) => document.querySelector(s);
 
@@ -57,10 +60,18 @@ function open(newMode, title) {
   if (!lastTrigger || lastTrigger.tagName === 'BUTTON') {
     requestAnimationFrame(() => $('#sideTitle').focus());
   }
+  if (!restoringView) markViewDirty();
 }
 
 export function currentSideMode() {
   return mode;
+}
+
+export function sideViewState() {
+  return {
+    mode,
+    targetId: mode === MODE.PREVIEW ? previewId : null,
+  };
 }
 
 function syncPanelButtons() {
@@ -92,6 +103,7 @@ export function closeSide({ restoreFocus = true } = {}) {
     if (target) requestAnimationFrame(() => target.focus({ preventScroll: true }));
   }
   lastTrigger = null;
+  if (!restoringView) markViewDirty();
 }
 
 export function renderSide() {
@@ -111,6 +123,7 @@ export async function showPreview(id) {
   if (!n) return;
   open(MODE.PREVIEW, 'preview');
   previewId = id;
+  if (!restoringView) markViewDirty();
   previewData = { loading: true };
   renderSide();
 
@@ -219,7 +232,8 @@ export async function showReview(problems, log, applied) {
   renderSide();
 
   try {
-    const res = await api.post('/api/resolve', { plan: store.serialize() });
+    await flushPlan();
+    const res = await api.post('/api/resolve', store.static ? { plan: store.serialize() } : {});
     reviewData = { ...res, applied };
   } catch (e) {
     reviewData = { error: e.message };
@@ -351,7 +365,7 @@ function renderReview(body) {
     dry.disabled = true;
     dry.textContent = 'checking\u2026';
     dry.setAttribute('aria-busy', 'true');
-    await runApply(true);
+    await runSafetyCheck();
     if (dry.isConnected) {
       dry.disabled = false;
       dry.textContent = 'run safety check';
@@ -360,38 +374,19 @@ function renderReview(body) {
   });
   row.appendChild(dry);
 
-  if (store.allowApply) {
-    const go = el('button', 'btn danger', `apply ${ops.length} operation(s) to disk`);
-    go.title = 'Move files on disk after writing an undo script';
-    go.addEventListener('click', () => {
-      const t = d.stats && d.stats.trash;
-      const msg = [
-        `Apply ${ops.length} operation(s) to ${store.scan.root}?`,
-        '',
-        t ? `${t} item(s) move to .reorg/trash/ -- nothing is deleted.` : 'Nothing will be deleted.',
-        'An undo script is written before any change.',
-      ].join('\n');
-      if (window.confirm(msg)) runApply(false);
-    });
-    row.appendChild(go);
-  } else {
-    const unavailable = el('button', 'btn', 'apply to disk unavailable');
-    unavailable.disabled = true;
-    unavailable.setAttribute('aria-describedby', 'applyLimit');
-    row.appendChild(unavailable);
-  }
+  const unavailable = el('button', 'btn', 'apply to disk unavailable');
+  unavailable.disabled = true;
+  unavailable.setAttribute('aria-describedby', 'applyLimit');
+  row.appendChild(unavailable);
   actions.appendChild(row);
 
-  if (!store.allowApply) {
-    const limit = el(
-      'p',
-      'note-empty',
-      'This browser session is planning-only. Apply the saved plan with  reorg apply --yes  in the terminal, ' +
-        'or restart with  reorg --allow-apply.'
-    );
-    limit.id = 'applyLimit';
-    actions.appendChild(limit);
-  }
+  const limit = el(
+    'p',
+    'note-empty',
+    'Filesystem changes are CLI-only. Apply the saved plan with  reorg apply --yes  in the terminal.'
+  );
+  limit.id = 'applyLimit';
+  actions.appendChild(limit);
   if (store.undoScripts && store.undoScripts.length) {
     actions.appendChild(
       el('p', 'note-empty', `Previous runs you can still undo: ${store.undoScripts.join(', ')}`)
@@ -556,6 +551,27 @@ export function showHelp() {
   renderSide();
 }
 
+export async function restoreSideView(side = {}) {
+  restoringView = true;
+  try {
+    if (side.mode === MODE.PREVIEW && side.targetId && store.nodes.has(side.targetId)) {
+      await showPreview(side.targetId);
+    } else if (side.mode === MODE.REVIEW) {
+      await showReview();
+    } else if (side.mode === MODE.NOTES) {
+      showNotes();
+    } else if (side.mode === MODE.TRIAGE) {
+      await showTriage();
+    } else if (side.mode === MODE.HELP) {
+      showHelp();
+    } else if (mode !== MODE.NONE) {
+      closeSide({ restoreFocus: false });
+    }
+  } finally {
+    restoringView = false;
+  }
+}
+
 const KEYS = [
   ['Tab', 'enter the tree; the selected row exposes the same actions in the footer'],
   ['Enter / Space', 'preview a file, or fold a folder'],
@@ -601,7 +617,7 @@ function renderHelp(body) {
             'in this page until you export it from Review. Sibling order is derived (folders first, then ' +
             'alphabetical), so dragging something out and back is a genuine no-op rather than a phantom change.'
         : 'Nothing you do here touches disk. Your plan is a diff against the scan, saved to ' +
-            '.reorg/plan.json as you work, and applied only when you ask. Sibling order is derived ' +
+            'the shared workspace as you work, and applied only through the CLI. Sibling order is derived ' +
             '(folders first, then alphabetical), so dragging something out and back is a genuine no-op ' +
             'rather than a phantom change.'
     )

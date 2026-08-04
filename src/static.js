@@ -134,12 +134,13 @@ await import('reorg:app');
 `.trim();
 }
 
-export function buildStaticPlanner({ root, scan, plan, gitignore = '', undoScripts = [] }) {
+export function buildStaticPlanner({ root, scan, plan, view = null, gitignore = '', undoScripts = [] }) {
   const previewResult = collectPreviews(root, scan);
   const analysis = analyze(scan);
   const data = {
     scan,
     plan,
+    view,
     gitignore,
     undoScripts,
     triage: {

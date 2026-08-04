@@ -16,6 +16,20 @@ import { store, childrenOf, isDir, isDescendant } from './store.js';
 const OK = { ok: true, changed: true };
 const NOOP = { ok: true, changed: false };
 const fail = (message) => ({ ok: false, changed: false, message });
+const changed = (command, extra = {}) => ({ ...OK, command, ...extra });
+
+export const PLAN_COMMAND = Object.freeze({
+  MOVE: 'move',
+  RENAME: 'rename',
+  CREATE_FOLDER: 'create-folder',
+  REMOVE_CREATED: 'remove-created',
+  TRASH: 'trash',
+  KEEP: 'keep',
+  RESTORE_ENTRY: 'restore-entry',
+  SET_NOTE: 'set-note',
+  DELETE_NOTE: 'delete-note',
+  RESET_PLAN: 'reset-plan',
+});
 
 /**
  * A name has to survive being joined into a path on the server, so the checks are
@@ -41,7 +55,7 @@ export function moveNode(srcId, targetId) {
   src.cur.parentId = targetId;
   const t = store.nodes.get(targetId);
   if (t) t.collapsed = false;
-  return OK;
+  return changed({ type: PLAN_COMMAND.MOVE, id: srcId, parentId: targetId });
 }
 
 /**
@@ -56,7 +70,7 @@ export function renameNode(id, rawName) {
   if (!val || val === n.cur.name) return NOOP;
   if (!isValidName(val)) return fail('A name cannot contain "/" or start with a dot-dot.');
   n.cur.name = val;
-  return OK;
+  return changed({ type: PLAN_COMMAND.RENAME, id, name: val });
 }
 
 /**
@@ -77,12 +91,12 @@ export function toggleEvict(id) {
     }
   };
   walk(n, n.evicted);
-  return OK;
+  return changed({ type: n.evicted ? PLAN_COMMAND.TRASH : PLAN_COMMAND.KEEP, id });
 }
 
 /** Create a folder that exists only in the plan. Returns its new id. */
 export function addDir(parentId, name = 'new-folder') {
-  const id = 'new:' + ++store.seq;
+  const id = `new:${crypto.randomUUID()}`;
   store.nodes.set(id, {
     id,
     name,
@@ -101,7 +115,7 @@ export function addDir(parentId, name = 'new-folder') {
   });
   const parent = store.nodes.get(parentId);
   if (parent) parent.collapsed = false;
-  return { ...OK, id };
+  return changed({ type: PLAN_COMMAND.CREATE_FOLDER, id, parentId, name }, { id });
 }
 
 /**
@@ -118,7 +132,7 @@ export function deleteCreated(id) {
   for (const c of childrenOf(n.id)) c.cur.parentId = n.cur.parentId;
   store.nodes.delete(n.id);
   store.notes = store.notes.filter((x) => x.target !== n.id);
-  return OK;
+  return changed({ type: PLAN_COMMAND.REMOVE_CREATED, id });
 }
 
 /* Theme is a three-state cycle rather than a boolean: "follow the OS" has to stay

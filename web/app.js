@@ -1,9 +1,9 @@
 /* reorg -- browser planner.
  *
  * Mirrors src/plan.js deliberately: the same derived-order and change-detection
- * rules run here for display and on the server for execution. The server is the
- * authority (it resolves and applies), so this file never computes operations --
- * it POSTs the plan to /api/resolve and renders what comes back.
+ * rules run here for display and on the server for resolution. The workspace is
+ * authoritative, so this file submits semantic commands and renders canonical
+ * plan and view revisions
  *
  * DOM is built with createElement/textContent throughout, never innerHTML: every
  * string here is a filename or file content, i.e. untrusted input.
@@ -22,6 +22,8 @@ import {
   showHelp,
   closeSide,
   currentSideMode,
+  sideViewState,
+  restoreSideView,
 } from './lib/side.js';
 import { toast, el } from './lib/dom.js';
 import { createPlanExport, PLAN_EXPORT_FILENAME } from './lib/plan-file.js';
@@ -32,48 +34,233 @@ const TOP_LEVEL_LOCATION = 'the top level';
 
 let saveTimer = null;
 let saveState = 'clean';
+let planQueue = [];
+let retryBatch = null;
+let saveInFlight = null;
+let viewTimer = null;
+let viewInFlight = null;
+let viewDirty = false;
+let viewSaveState = 'clean';
+let canonicalReloadNeeded = false;
+let pollInFlight = false;
+
+const PLAN_SAVE_DEBOUNCE_MS = 180;
+const VIEW_SAVE_DEBOUNCE_MS = 180;
+const REVISION_POLL_MS = 750;
+const API_ERROR_CODE = Object.freeze({
+  REVISION_CONFLICT: 'revision-conflict',
+  WORKSPACE_BUSY: 'workspace-busy',
+});
 
 window.addEventListener('beforeunload', (event) => {
-  if (!store.static || saveState !== 'dirty') return;
+  if (
+    saveState !== 'dirty' &&
+    saveState !== 'saving' &&
+    saveState !== 'error' &&
+    viewSaveState !== 'dirty' &&
+    viewSaveState !== 'saving' &&
+    viewSaveState !== 'error'
+  ) return;
   event.preventDefault();
   event.returnValue = '';
 });
 
 /* ---------------------------------------------------------------- persistence */
-// The plan lives on disk, so there is no export/import dance: every edit debounces
-// straight to .reorg/plan.json. The indicator distinguishes "saving" from "saved"
-// from "failed" -- a silent failed write would be the worst outcome here.
-export function markDirty() {
+// Plan edits debounce into semantic transactions while presentation edits use an
+// independent view revision so neither browser nor agent replaces whole state files
+export function markDirty(command) {
   saveState = 'dirty';
   renderSaveState();
   if (store.static) {
     renderAll();
     return;
   }
+  if (!command) throw new Error('A live plan edit requires a semantic command');
+  planQueue.push(command);
+  markViewDirty();
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(save, 350);
+  saveTimer = setTimeout(() => flushPlan(), PLAN_SAVE_DEBOUNCE_MS);
   renderAll();
 }
 
-async function save() {
-  try {
-    saveState = 'saving';
-    renderSaveState();
-    const { savedAt } = await api.put('/api/plan', { plan: store.serialize() });
-    store.savedAt = savedAt;
-    saveState = 'clean';
-  } catch (e) {
-    saveState = 'error';
-    toast(`Could not save your plan: ${e.message}`, true);
+async function reloadFromServer(message = '') {
+  const data = await api.get('/api/tree');
+  store.applyScan(data.scan, data.plan || {}, data.view || null);
+  store.savedAt = data.plan?.savedAt || null;
+  saveState = 'clean';
+  viewSaveState = 'clean';
+  renderAll();
+  await restoreSideView(store.sideView);
+  if (message) toast(message);
+  return data;
+}
+
+export async function flushPlan() {
+  clearTimeout(saveTimer);
+  if (store.static || (!planQueue.length && !retryBatch && !saveInFlight)) return;
+  if (saveInFlight) {
+    await saveInFlight;
+    if (planQueue.length || retryBatch) return flushPlan();
+    return;
   }
+
+  const batch = retryBatch || {
+    commands: planQueue.splice(0),
+    transactionId: crypto.randomUUID(),
+  };
+  retryBatch = null;
+  const commands = batch.commands;
+  const expectedRevision = store.planRevision;
+  saveInFlight = (async () => {
+    try {
+      saveState = 'saving';
+      renderSaveState();
+      let result;
+      try {
+        result = await api.post('/api/transactions', {
+          expectedRevision,
+          transactionId: batch.transactionId,
+          actor: 'browser',
+          commands,
+        });
+      } catch (e) {
+        if (e.status !== 409 || e.payload?.code !== API_ERROR_CODE.REVISION_CONFLICT) throw e;
+        const revisions = await api.get('/api/revisions');
+        result = await api.post('/api/transactions', {
+          expectedRevision: revisions.planRevision,
+          transactionId: batch.transactionId,
+          actor: 'browser',
+          commands,
+        });
+        canonicalReloadNeeded = true;
+        toast('Merged this edit with a plan change made elsewhere.');
+      }
+      if (result.duplicate) canonicalReloadNeeded = true;
+      store.planRevision = result.plan.revision;
+      store.recentTransactions = result.plan.recentTransactions || [];
+      store.recentTransactionDigests = { ...(result.plan.recentTransactionDigests || {}) };
+      store.savedAt = result.plan.savedAt;
+      saveState = planQueue.length || retryBatch ? 'dirty' : 'clean';
+    } catch (e) {
+      retryBatch = batch;
+      if (e.status === 503 && e.payload?.code === API_ERROR_CODE.WORKSPACE_BUSY) {
+        saveState = 'saving';
+        await new Promise((resolve) => setTimeout(resolve, REVISION_POLL_MS));
+      } else {
+        saveState = 'error';
+        toast(`Could not save your plan: ${e.message}`, true);
+      }
+    } finally {
+      saveInFlight = null;
+      renderSaveState();
+    }
+  })();
+  await saveInFlight;
+  if ((planQueue.length || retryBatch) && saveState !== 'error') return flushPlan();
+  if (viewDirty && !viewInFlight && saveState !== 'error') {
+    clearTimeout(viewTimer);
+    viewTimer = setTimeout(() => flushView(), VIEW_SAVE_DEBOUNCE_MS);
+  }
+  await reloadCanonicalIfReady();
+}
+
+export function markViewDirty() {
+  viewDirty = true;
+  if (store.static) {
+    saveState = 'dirty';
+    renderSaveState();
+    return;
+  }
+  viewSaveState = 'dirty';
   renderSaveState();
+  clearTimeout(viewTimer);
+  viewTimer = setTimeout(() => flushView(), VIEW_SAVE_DEBOUNCE_MS);
+}
+
+async function flushView() {
+  clearTimeout(viewTimer);
+  if (store.static || (!viewDirty && !viewInFlight)) return;
+  if (viewInFlight) {
+    await viewInFlight;
+    if (viewDirty) return flushView();
+    return;
+  }
+  if (planQueue.length || retryBatch || saveInFlight) {
+    await flushPlan();
+    if (planQueue.length || retryBatch || saveInFlight) return;
+  }
+
+  viewDirty = false;
+  const expectedRevision = store.viewRevision;
+  const patch = store.serializeView(sideViewState());
+  delete patch.version;
+  delete patch.revision;
+  viewInFlight = (async () => {
+    try {
+      viewSaveState = 'saving';
+      renderSaveState();
+      const result = await api.put('/api/view', { expectedRevision, patch });
+      store.viewRevision = result.view.revision;
+      viewSaveState = 'clean';
+    } catch (e) {
+      if (e.status === 409 && e.payload?.code === API_ERROR_CODE.REVISION_CONFLICT) {
+        await reloadFromServer('The shared view changed elsewhere; this tab has caught up.');
+        viewSaveState = 'clean';
+      } else if (e.status === 503 && e.payload?.code === API_ERROR_CODE.WORKSPACE_BUSY) {
+        viewDirty = true;
+        viewSaveState = 'saving';
+        await new Promise((resolve) => setTimeout(resolve, REVISION_POLL_MS));
+      } else {
+        viewDirty = true;
+        viewSaveState = 'error';
+        toast(`Could not save the shared view: ${e.message}`, true);
+      }
+    } finally {
+      viewInFlight = null;
+      renderSaveState();
+    }
+  })();
+  await viewInFlight;
+  if (viewDirty) return flushView();
+  await reloadCanonicalIfReady();
+}
+
+async function reloadCanonicalIfReady() {
+  const busy = planQueue.length || retryBatch || saveInFlight || viewDirty || viewInFlight;
+  if (!canonicalReloadNeeded || busy) return;
+  canonicalReloadNeeded = false;
+  try {
+    await reloadFromServer();
+  } catch (error) {
+    canonicalReloadNeeded = true;
+    toast(`Could not reload the merged workspace: ${error.message}`, true);
+  }
+}
+
+async function pollRevisions() {
+  if (store.static || pollInFlight) return;
+  pollInFlight = true;
+  try {
+    const revisions = await api.get('/api/revisions');
+    const scanChanged = revisions.scanId !== store.scan?.id;
+    const planChanged = revisions.planRevision !== store.planRevision;
+    const viewChanged = revisions.viewRevision !== store.viewRevision;
+    const idle = !planQueue.length && !retryBatch && !saveInFlight && !viewDirty && !viewInFlight;
+    if ((scanChanged || planChanged || viewChanged) && idle) {
+      await reloadFromServer();
+    }
+  } catch {
+    // The save path carries an actionable connection error when the user edits
+  } finally {
+    pollInFlight = false;
+  }
 }
 
 function renderSaveState() {
   const s = $('#saveState');
-  s.classList.toggle('dirty', saveState === 'dirty' || saveState === 'saving');
-  s.classList.toggle('error', saveState === 'error');
   if (store.static) {
+    s.classList.toggle('dirty', saveState === 'dirty');
+    s.classList.toggle('error', saveState === 'error');
     s.textContent =
       saveState === 'exported'
         ? 'plan exported'
@@ -83,17 +270,31 @@ function renderSaveState() {
     s.title = 'This page cannot save changes; export the plan from Review';
     return;
   }
+  const state =
+    saveState === 'error' || viewSaveState === 'error'
+      ? 'error'
+      : saveState === 'saving' || viewSaveState === 'saving'
+        ? 'saving'
+        : saveState === 'dirty' || viewSaveState === 'dirty'
+          ? 'dirty'
+          : 'clean';
+  s.classList.toggle('dirty', state === 'dirty' || state === 'saving');
+  s.classList.toggle('error', state === 'error');
   const map = {
-    clean: store.savedAt ? 'saved to .reorg/plan.json' : 'no changes yet',
+    clean: `saved \u00b7 plan ${store.planRevision} \u00b7 view ${store.viewRevision}`,
     dirty: 'unsaved\u2026',
     saving: 'saving\u2026',
     error: 'SAVE FAILED',
   };
-  s.textContent = map[saveState];
+  s.textContent = map[state];
 }
 
 function exportedPlanText() {
-  return JSON.stringify(createPlanExport(store.scan, store.serialize()), null, 2) + '\n';
+  return JSON.stringify(
+    createPlanExport(store.scan, store.serialize(), store.serializeView(sideViewState())),
+    null,
+    2
+  ) + '\n';
 }
 
 function markExported() {
@@ -163,6 +364,7 @@ export function renderDelta() {
     chip.setAttribute('aria-pressed', String(store.ui.filterTag === key));
     chip.addEventListener('click', () => {
       store.ui.filterTag = store.ui.filterTag === key ? null : key;
+      markViewDirty();
       renderAll();
     });
     bar.appendChild(chip);
@@ -284,7 +486,7 @@ function buildToolbar() {
         store.ui.git = !store.ui.git;
         document.body.classList.toggle('git-on', store.ui.git);
         b.classList.toggle('on', store.ui.git);
-        markDirty();
+        markViewDirty();
       },
       { toggleKey: 'git' }
     );
@@ -296,7 +498,7 @@ function buildToolbar() {
       store.ui.heat = !store.ui.heat;
       document.body.classList.toggle('heat-on', store.ui.heat);
       b.classList.toggle('on', store.ui.heat);
-      markDirty();
+      markViewDirty();
     },
     { toggleKey: 'heat' }
   );
@@ -304,7 +506,7 @@ function buildToolbar() {
     const b = mk('theme: system', 'Cycle between system, dark, and light themes', () => {
       edit.cycleTheme();
       applyTheme();
-      markDirty();
+      markViewDirty();
     });
     b.dataset.themeBtn = '';
   }
@@ -364,12 +566,14 @@ function applyTheme() {
 /* ---------------------------------------------------------------- actions */
 export function setAllCollapsed(v) {
   edit.setAllCollapsed(v);
+  markViewDirty();
   renderAll();
   toast(v ? 'Collapsed all loaded folders' : 'Expanded all loaded folders');
 }
 
 export function toggleCollapse(n, deep) {
   edit.toggleCollapse(n.id, deep);
+  markViewDirty();
   renderAll();
 }
 
@@ -377,7 +581,7 @@ export function toggleEvict(n) {
   const label = pathOf(n.id);
   const res = edit.toggleEvict(n.id);
   if (!res.changed) return;
-  markDirty();
+  markDirty(res.command);
   toast(
     n.evicted
       ? `Marked ${label} for trash. Files stay on disk until the plan is applied.`
@@ -450,9 +654,10 @@ function createPlannedFolder(parentId, rawName, { select = true } = {}) {
   const name = rawName.trim();
   const problem = folderNameProblem(name, parentId);
   if (problem) return { ok: false, problem };
-  const { id } = edit.addDir(parentId, name);
+  const result = edit.addDir(parentId, name);
+  const { id } = result;
   if (select) store.selectedId = id;
-  markDirty();
+  markDirty(result.command);
   toast(`Planned folder: ${pathOf(id)}. Nothing was created on disk.`);
   return { ok: true, id };
 }
@@ -473,10 +678,11 @@ export function openCreateFolderDialog(parentId = preferredFolderParent()) {
 }
 
 export function deleteCreated(n) {
-  if (!edit.deleteCreated(n.id).changed) return;
+  const result = edit.deleteCreated(n.id);
+  if (!result.changed) return;
   const label = n.cur.name;
   if (store.selectedId === n.id) store.selectedId = null;
-  markDirty();
+  markDirty(result.command);
   toast(`Removed the planned folder ${label}`);
 }
 
@@ -502,7 +708,7 @@ export function beginRename(n, nameEl) {
     nameEl.removeAttribute('contenteditable');
     const res = commit ? edit.renameNode(n.id, nameEl.textContent) : { ok: true, changed: false };
     if (res.changed) {
-      markDirty();
+      markDirty(res.command);
     } else {
       if (!res.ok) toast(res.message, true);
       nameEl.textContent = n.cur.name;
@@ -532,7 +738,7 @@ export function moveNode(srcId, targetId) {
     toast(`${before} is already in that folder`);
     return;
   }
-  markDirty();
+  markDirty(res.command);
   toast(
     targetId === ROOT_ID
       ? `Planned move: ${before} to the top level. Files on disk are unchanged.`
@@ -678,8 +884,9 @@ export function addNote(targetId) {
   const label = targetId === ROOT_ID ? 'the whole plan' : pathOf(targetId);
   const body = window.prompt(`Note on ${label}\n\nWhy this moves, what to check, what to decide later.`, '');
   if (body === null || !body.trim()) return;
-  store.notes.push({ id: 'note:' + ++store.noteSeq, target: targetId, body: body.trim() });
-  markDirty();
+  const note = { id: `note:${crypto.randomUUID()}`, target: targetId, body: body.trim() };
+  store.notes.push(note);
+  markDirty({ type: edit.PLAN_COMMAND.SET_NOTE, ...note });
 }
 
 export function editNote(id) {
@@ -687,14 +894,19 @@ export function editNote(id) {
   if (!note) return;
   const body = window.prompt('Edit note:', note.body);
   if (body === null) return;
-  if (!body.trim()) store.notes = store.notes.filter((n) => n.id !== id);
-  else note.body = body.trim();
-  markDirty();
+  if (!body.trim()) {
+    store.notes = store.notes.filter((n) => n.id !== id);
+    markDirty({ type: edit.PLAN_COMMAND.DELETE_NOTE, id });
+  } else {
+    note.body = body.trim();
+    markDirty({ type: edit.PLAN_COMMAND.SET_NOTE, ...note });
+  }
 }
 
 export function deleteNote(id) {
+  if (!store.notes.some((note) => note.id === id)) return;
   store.notes = store.notes.filter((n) => n.id !== id);
-  markDirty();
+  markDirty({ type: edit.PLAN_COMMAND.DELETE_NOTE, id });
 }
 
 async function rescan(button) {
@@ -706,9 +918,13 @@ async function rescan(button) {
   }
   toast('Rescanning the directory from disk\u2026');
   try {
-    const { scan } = await api.post('/api/rescan', {});
+    await flushPlan();
+    await flushView();
+    if (retryBatch) throw new Error('The pending plan edit must be saved before rescanning');
+    const data = await api.post('/api/rescan', {});
     const before = store.countTouched();
-    store.applyScan(scan, store.serialize());
+    store.applyScan(data.scan, data.plan, data.view);
+    store.savedAt = data.plan.savedAt;
     const after = store.countTouched();
     renderAll();
     const lost = before - after;
@@ -736,36 +952,33 @@ function revertAll() {
   if (!window.confirm('Reset every planned change and note?\n\nFiles on disk are untouched.')) return;
   store.reset();
   store.selectedId = null;
-  markDirty();
+  markDirty({ type: edit.PLAN_COMMAND.RESET_PLAN });
   closeSide();
   toast('Plan reset. Files on disk were untouched.');
 }
 
 /* ---------------------------------------------------------------- apply */
-export async function runApply(dryRun) {
+export async function runSafetyCheck() {
   try {
-    const res = await api.post('/api/apply', { plan: store.serialize(), dryRun });
+    await flushPlan();
+    await flushView();
+    if (retryBatch) throw new Error('The pending plan edit must be saved before applying');
+    const res = await api.post('/api/apply', { dryRun: true });
     if (res.problems && res.problems.length) {
       showReview(res.problems.map((p) => (typeof p === 'string' ? { message: p } : p)));
       toast('The tree changed since the scan, so nothing was applied. Rescan and retry.', true);
       return;
     }
-    if (dryRun) {
-      showReview(null, res.log);
-      toast(`Dry run: ${res.log.length} operation(s). Nothing changed.`);
+    showReview(null, res.log);
+    toast(`Dry run: ${res.log.length} operation(s). Nothing changed.`);
+  } catch (e) {
+    if (e.payload?.problems?.length) {
+      showReview(e.payload.problems.map((problem) =>
+        typeof problem === 'string' ? { message: problem } : problem
+      ));
+      toast('The tree changed since the scan, so nothing was applied. Rescan and retry.', true);
       return;
     }
-    store.applyScan(res.scan, { ...store.serialize(), overrides: [], created: [], notes: store.notes });
-    store.clearPlanEdits();
-    await save();
-    renderAll();
-    showReview(null, res.log, {
-      applied: res.applied,
-      undo: res.undoPath,
-      trash: res.trashRoot,
-    });
-    toast(`Applied ${res.applied} operation(s). Undo: bash ${res.undoPath}`);
-  } catch (e) {
     toast(`Apply failed: ${e.message}`, true);
   }
 }
@@ -808,6 +1021,7 @@ function wireKeyboard() {
         item.setAttribute('aria-selected', 'false');
       }
       store.selectedId = null;
+      markViewDirty();
       renderDelta();
       return;
     }
@@ -909,6 +1123,7 @@ function wireFilter() {
     clearTimeout(t);
     t = setTimeout(() => {
       store.ui.filterText = box.value;
+      markViewDirty();
       renderAll();
     }, 120);
   });
@@ -944,11 +1159,11 @@ function wireResizer() {
     rz.classList.remove('dragging');
     document.body.style.cursor = '';
     document.body.style.userSelect = '';
-    markDirty();
+    markViewDirty();
   });
   rz.addEventListener('dblclick', () => {
     setW(42);
-    markDirty();
+    markViewDirty();
   });
   rz.addEventListener('keydown', (e) => {
     if (!stage.classList.contains('split')) return;
@@ -956,11 +1171,11 @@ function wireResizer() {
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
       setW((store.ui.sideW || 42) + (e.key === 'ArrowLeft' ? step : -step));
-      markDirty();
+      markViewDirty();
     } else if (e.key === 'Home' || e.key === 'End') {
       e.preventDefault();
       setW(e.key === 'Home' ? 80 : 20);
-      markDirty();
+      markViewDirty();
     }
   });
   if (store.ui.sideW) stage.style.setProperty('--side-w', store.ui.sideW + '%');
@@ -985,12 +1200,9 @@ function renderScopeBanner() {
   if (store.static) {
     lead.textContent = 'Static snapshot: ';
     detail = 'changes stay in this page until you export from Review; this page cannot rescan or move files';
-  } else if (store.allowApply) {
-    lead.textContent = 'Plan first: ';
-    detail = 'browser actions update the saved plan; files move only after Review, Apply, and confirmation';
   } else {
     lead.textContent = 'Planning only: ';
-    detail = 'browser actions update .reorg/plan.json; files stay on disk until you run reorg apply --yes';
+    detail = 'browser actions update the shared workspace; files stay on disk until you run reorg apply --yes';
   }
   banner.append(lead, document.createTextNode(detail));
   banner.classList.toggle('bad', !!store.scan.truncated);
@@ -1036,6 +1248,9 @@ async function boot() {
   wireResizer();
   wireFolderDialogs();
   renderAll();
+  await restoreSideView(store.sideView);
+
+  if (!store.static) setInterval(pollRevisions, REVISION_POLL_MS);
 
   if (data.scan.truncated) {
     toast('This tree hit the scan limit, so it is only partly shown. Restart with a bigger --max-nodes.', true);

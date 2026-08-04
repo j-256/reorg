@@ -2,7 +2,7 @@ export const PLAN_EXPORT_FORMAT = 'reorg-plan';
 export const PLAN_EXPORT_VERSION = 1;
 export const PLAN_EXPORT_FILENAME = 'reorg-plan.json';
 
-export function createPlanExport(scan, plan) {
+export function createPlanExport(scan, plan, view = null) {
   if (!scan || !Array.isArray(scan.nodes) || typeof scan.root !== 'string') {
     throw new Error('Cannot export a plan without its source scan');
   }
@@ -13,6 +13,7 @@ export function createPlanExport(scan, plan) {
     scannedAt: scan.generated || null,
     scan,
     plan,
+    ...(view ? { view } : {}),
   };
 }
 
@@ -39,10 +40,14 @@ export function parsePlanExport(value) {
   if (typeof value.root !== 'string' || value.root !== value.scan.root) {
     throw new Error('Exported plan root does not match its source scan');
   }
+  if (value.view != null && (typeof value.view !== 'object' || Array.isArray(value.view))) {
+    throw new Error('Exported plan view must be an object');
+  }
 
   return {
     sourceRoot: value.root,
     scan: value.scan,
     plan: value.plan,
+    view: value.view || null,
   };
 }

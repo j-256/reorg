@@ -1,9 +1,8 @@
-// The local server: static files from web/, a small JSON API over the plan.
+// The local server: static files from web/ and a JSON API over shared workspace state
 //
 // Deliberately stdlib-only (node:http). It binds to loopback and carries a
-// per-run token, because it exposes file reads and (behind an explicit flag)
-// filesystem mutations -- that is a capability worth fencing even on localhost,
-// where any other process or a stray browser tab could otherwise reach it.
+// per-run token because it exposes file reads and planning-state mutations, a
+// capability worth fencing even on localhost
 
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
@@ -12,14 +11,29 @@ import { join, extname, resolve as resolvePath, relative, dirname } from 'node:p
 import { fileURLToPath } from 'node:url';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { scan, readGitignore } from './scan.js';
-import { loadPlan, savePlan, listUndoScripts, stateDir, clearAppliedPlan } from './state.js';
+import {
+  acquireServerLease,
+  ensureWorkspace,
+  loadPlan,
+  loadScan,
+  loadTransactions,
+  loadView,
+  listUndoScripts,
+  saveScan,
+  stateDir,
+  WORKSPACE_BUSY_CODE,
+  withWorkspaceLock,
+} from './state.js';
 import { resolve as resolvePlan, describeOp } from './plan.js';
 import { apply } from './apply.js';
 import { summarize } from './summarize.js';
 import { looksTextual } from './text.js';
 import { analyze, ranked } from './signals.js';
+import { COMMAND_ERROR_CODE, CommandError, transactPlan } from './commands.js';
+import { materializeView, transactView } from './view.js';
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
+const INVALID_JSON_CODE = 'invalid-json';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -57,7 +71,11 @@ async function readBody(req, limit = 32 * 1024 * 1024) {
     chunks.push(chunk);
   }
   if (!chunks.length) return {};
-  return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  } catch {
+    throw new CommandError('Request body is not valid JSON', { code: INVALID_JSON_CODE });
+  }
 }
 
 function tokenOk(expected, given) {
@@ -80,17 +98,65 @@ function safeJoin(root, relPath) {
   return abs;
 }
 
-export function createReorgServer({ root, allowApply = false, token = randomBytes(24).toString('hex') }) {
-  // Cached scan: rescans are explicit, so a plan is always diffed against a known
-  // tree rather than a moving target.
+export function createReorgServer({
+  root,
+  dataDir = null,
+  scanOptions = {},
+  token = randomBytes(24).toString('hex'),
+}) {
+  // Keep one in-memory scan for normal requests and adopt a newer persisted scan
+  // after an explicit external refresh
   let current = { scan: null, gitignore: '' };
+  let releaseLease;
+  const workspace = withWorkspaceLock(root, dataDir, () => {
+    const opened = ensureWorkspace(root, dataDir);
+    if (resolvePath(opened.root) !== resolvePath(root)) {
+      throw new Error(`Workspace is bound to ${opened.root}; rebind it before serving ${root}`);
+    }
+    current.scan = loadScan(root, dataDir);
+    releaseLease = acquireServerLease(root, dataDir);
+    return opened;
+  });
 
   const rescan = (opts = {}) => {
-    current.scan = scan(root, opts);
-    current.gitignore = readGitignore(root);
+    if (!opts || typeof opts !== 'object' || Array.isArray(opts)) {
+      throw new CommandError('Rescan options must be an object');
+    }
+    return withWorkspaceLock(root, dataDir, () => {
+      const requested = Object.fromEntries(
+        Object.entries({ ...scanOptions, ...opts }).filter(([, value]) => value !== undefined)
+      );
+      const options = { ...(current.scan?.options || {}), ...requested };
+      current.scan = scan(root, options);
+      current.gitignore = readGitignore(root);
+      saveScan(root, current.scan, dataDir);
+      return current.scan;
+    });
+  };
+  try {
+    if (!current.scan || Object.keys(scanOptions).length) rescan();
+    else current.gitignore = readGitignore(root);
+  } catch (error) {
+    releaseLease();
+    throw error;
+  }
+
+  const syncScan = () => {
+    const persisted = loadScan(root, dataDir);
+    if (persisted && persisted.id !== current.scan?.id) {
+      current.scan = persisted;
+      current.gitignore = readGitignore(root);
+    }
     return current.scan;
   };
-  rescan();
+
+  const readState = (reader) =>
+    withWorkspaceLock(root, dataDir, () => {
+      const frozen = syncScan();
+      const plan = loadPlan(root, dataDir);
+      const view = loadView(root, dataDir, plan.ui);
+      return reader({ scan: frozen, plan, view });
+    });
 
   const server = createServer(async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
@@ -113,7 +179,7 @@ export function createReorgServer({ root, allowApply = false, token = randomByte
       // Ranked cleanup candidates. Name- and structure-based, never age-based --
       // see src/signals.js for the measurements behind that choice.
       if (req.method === 'GET' && path === '/api/triage') {
-        const analysis = analyze(current.scan);
+        const analysis = readState(({ scan: frozen }) => analyze(frozen));
         return sendJson(res, 200, {
           candidates: ranked(analysis, 200),
           total: analysis.size,
@@ -121,25 +187,85 @@ export function createReorgServer({ root, allowApply = false, token = randomByte
       }
 
       if (req.method === 'GET' && path === '/api/tree') {
+        const snapshot = readState(({ scan: frozen, plan, view }) => ({
+          scan: frozen,
+          plan,
+          view: materializeView(frozen, plan, view).view,
+        }));
         return sendJson(res, 200, {
-          scan: current.scan,
-          plan: loadPlan(root),
+          workspace,
+          ...snapshot,
           gitignore: current.gitignore,
-          allowApply,
           undoScripts: listUndoScripts(root),
         });
       }
 
       if (req.method === 'POST' && path === '/api/rescan') {
         const body = await readBody(req);
-        const s = rescan(body.options || {});
-        return sendJson(res, 200, { scan: s, gitignore: current.gitignore });
+        rescan(body.options || {});
+        const snapshot = readState(({ scan: frozen, plan, view }) => ({
+          scan: frozen,
+          plan,
+          view: materializeView(frozen, plan, view).view,
+        }));
+        return sendJson(res, 200, {
+          ...snapshot,
+          gitignore: current.gitignore,
+        });
       }
 
-      if (req.method === 'PUT' && path === '/api/plan') {
+      if (req.method === 'GET' && path === '/api/revisions') {
+        const revisions = readState(({ scan: frozen, plan, view }) => ({
+          scanId: frozen.id,
+          planRevision: plan.revision,
+          viewRevision: view.revision,
+        }));
+        return sendJson(res, 200, {
+          ...revisions,
+        });
+      }
+
+      if (req.method === 'GET' && path === '/api/inspect') {
+        const snapshot = readState(({ scan: frozen, plan, view }) => {
+          const projection = materializeView(frozen, plan, view);
+          return {
+            scan: frozen,
+            plan,
+            transactions: loadTransactions(root, dataDir),
+            view: projection.view,
+            projection,
+            resolved: resolvePlan(frozen, plan),
+          };
+        });
+        return sendJson(res, 200, {
+          workspace,
+          ...snapshot,
+        });
+      }
+
+      if (req.method === 'POST' && path === '/api/transactions') {
         const body = await readBody(req);
-        const saved = savePlan(root, body.plan || {});
-        return sendJson(res, 200, { savedAt: saved.savedAt });
+        const result = transactPlan({
+          root,
+          dataDir,
+          scan: current.scan,
+          commands: body.commands,
+          expectedRevision: body.expectedRevision,
+          transactionId: body.transactionId,
+          actor: body.actor ?? 'browser',
+        });
+        return sendJson(res, 200, result);
+      }
+
+      if (req.method === 'PUT' && path === '/api/view') {
+        const body = await readBody(req);
+        const result = transactView({
+          root,
+          dataDir,
+          expectedRevision: body.expectedRevision,
+          patch: body.patch,
+        });
+        return sendJson(res, 200, result);
       }
 
       // First N lines of a file, for the preview pane.
@@ -187,8 +313,10 @@ export function createReorgServer({ root, allowApply = false, token = randomByte
 
       // Resolve the plan into ops without touching disk. Powers the review panel.
       if (req.method === 'POST' && path === '/api/resolve') {
-        const body = await readBody(req);
-        const { ops, problems, stats } = resolvePlan(current.scan, body.plan || {});
+        await readBody(req);
+        const { ops, problems, stats } = readState(({ scan: frozen, plan }) =>
+          resolvePlan(frozen, plan)
+        );
         return sendJson(res, 200, {
           ops,
           problems,
@@ -200,29 +328,24 @@ export function createReorgServer({ root, allowApply = false, token = randomByte
       if (req.method === 'POST' && path === '/api/apply') {
         const body = await readBody(req);
         const dryRun = body.dryRun !== false;
-        if (!dryRun && !allowApply) {
+        if (!dryRun) {
           return sendJson(res, 403, {
-            error:
-              'This server was started without --allow-apply, so it can only dry-run. ' +
-              'Restart with `reorg --allow-apply`, or run `reorg apply` from the terminal.',
+            error: 'Filesystem changes are only available through `reorg apply --yes` in the terminal.',
           });
         }
-        const { ops, problems } = resolvePlan(current.scan, body.plan || {});
-        if (problems.length) return sendJson(res, 409, { problems });
-
-        const log = [];
-        const result = apply(root, ops, { dryRun, onLog: (l) => log.push(l) });
-        if (!dryRun && !result.problems.length) {
-          // Retire the plan server-side rather than trusting the client to do it:
-          // if the browser's follow-up save never lands, a stale plan would make
-          // the next resolve report phantom collisions against what it just made.
-          clearAppliedPlan(root);
-          rescan();
-        }
+        const { result, log } = readState(({ scan: frozen, plan }) => {
+          const { ops, problems } = resolvePlan(frozen, plan);
+          if (problems.length) return { result: { problems }, log: [] };
+          const lines = [];
+          return {
+            result: apply(root, ops, { dryRun: true, onLog: (line) => lines.push(line) }),
+            log: lines,
+          };
+        });
+        if (result.problems.length) return sendJson(res, 409, { problems: result.problems });
         return sendJson(res, result.problems.length ? 409 : 200, {
           ...result,
           log,
-          scan: dryRun ? undefined : current.scan,
         });
       }
 
@@ -233,17 +356,26 @@ export function createReorgServer({ root, allowApply = false, token = randomByte
           paths: body.paths || [],
           model: body.model,
           force: !!body.force,
+          dataDir,
         });
         return sendJson(res, 200, out);
       }
 
       return sendJson(res, 404, { error: 'no such endpoint' });
     } catch (e) {
-      return sendJson(res, 500, { error: e.message });
+      const conflict = e instanceof CommandError && e.code === COMMAND_ERROR_CODE.REVISION_CONFLICT;
+      const busy = e.code === WORKSPACE_BUSY_CODE;
+      const status = busy ? 503 : conflict ? 409 : e instanceof CommandError ? 400 : 500;
+      return sendJson(res, status, {
+        error: e.message,
+        ...(e.code ? { code: e.code } : {}),
+        ...(e.details || {}),
+      });
     }
   });
+  server.once('close', releaseLease);
 
-  return { server, token, rescan, get scan() { return current.scan; } };
+  return { server, token, workspace, rescan, get scan() { return current.scan; } };
 }
 
 export { stateDir };
