@@ -6,6 +6,7 @@
 // simply omits the git layer.
 
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { readdirSync, existsSync, statSync, readlinkSync, realpathSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
@@ -398,9 +399,22 @@ export function scan(root, opts = {}) {
   }));
 
   const count = (pred) => nodes.filter(pred).length;
+  const options = {
+    all: descendAll,
+    hidden: includeHidden,
+    maxNodes,
+    maxDepth,
+    collapseOver,
+    git: opts.git !== false,
+  };
+  const scanId = createHash('sha256')
+    .update(JSON.stringify({ options, nodes }))
+    .digest('hex');
   return {
+    id: scanId,
     root,
     generated: new Date().toISOString(),
+    options,
     git: useGit,
     truncated,
     // What we chose not to expand, biggest first. A bare `truncated: true` tells

@@ -17,19 +17,62 @@ import {
   existsSync,
   appendFileSync,
   readdirSync,
+  openSync,
+  closeSync,
+  unlinkSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
 
 export const STATE_DIR = '.reorg';
 export const PLAN_FILE = 'plan.json';
 export const PLAN_VERSION = 1;
+export const WORKSPACE_FILE = 'workspace.json';
+export const WORKSPACE_VERSION = 1;
+export const SCAN_FILE = 'scan.json';
+export const VIEW_FILE = 'view.json';
+export const VIEW_VERSION = 1;
+export const TRANSACTION_LOG_FILE = 'transactions.jsonl';
+export const LOCK_FILE = 'workspace.lock';
+export const RECENT_TRANSACTION_LIMIT = 100;
 
-export function stateDir(root) {
+export function stateDir(root, dataDir = null) {
+  return dataDir ? resolvePath(dataDir) : join(root, STATE_DIR);
+}
+
+export function recoveryDir(root) {
   return join(root, STATE_DIR);
 }
 
-export function planPath(root) {
-  return join(stateDir(root), PLAN_FILE);
+export function validateDataDir(root, dataDir = null) {
+  const rootAbs = resolvePath(root);
+  const dir = stateDir(rootAbs, dataDir);
+  const rel = relative(rootAbs, dir);
+  const isDefault = dir === recoveryDir(rootAbs);
+  if (rel === '') {
+    throw new Error('The reorganized directory itself cannot be used as --data-dir');
+  }
+  const isInside = rel !== '' && !isAbsolute(rel) && rel !== '..' && !rel.startsWith(`..${sep}`);
+  if (isInside && !isDefault) {
+    throw new Error('An explicit --data-dir must be outside the reorganized directory');
+  }
+  return dir;
+}
+
+export function planPath(root, dataDir = null) {
+  return join(stateDir(root, dataDir), PLAN_FILE);
+}
+
+export function workspacePath(root, dataDir = null) {
+  return join(stateDir(root, dataDir), WORKSPACE_FILE);
+}
+
+export function scanPath(root, dataDir = null) {
+  return join(stateDir(root, dataDir), SCAN_FILE);
+}
+
+export function viewPath(root, dataDir = null) {
+  return join(stateDir(root, dataDir), VIEW_FILE);
 }
 
 export function emptyPlan() {
@@ -42,6 +85,21 @@ export function emptyPlan() {
     notes: [],
     summaries: {},
     ui: {},
+    revision: 0,
+    recentTransactions: [],
+  };
+}
+
+export function emptyView(legacyUi = {}) {
+  return {
+    version: VIEW_VERSION,
+    revision: 0,
+    savedAt: null,
+    ui: { ...legacyUi },
+    treeInitialized: false,
+    collapsed: [],
+    selectedId: null,
+    side: { mode: 'none', targetId: null },
   };
 }
 
@@ -55,38 +113,164 @@ function selfIgnore(dir) {
   writeFileSync(f, '# reorg working state -- not source. Ignored wholesale.\n*\n');
 }
 
-export function ensureStateDir(root) {
-  const dir = stateDir(root);
+export function ensureStateDir(root, dataDir = null) {
+  const dir = validateDataDir(root, dataDir);
   mkdirSync(dir, { recursive: true });
   selfIgnore(dir);
   return dir;
 }
 
-export function loadPlan(root) {
-  const p = planPath(root);
-  if (!existsSync(p)) return emptyPlan();
+function readJson(path, label) {
   try {
-    const parsed = JSON.parse(readFileSync(p, 'utf8'));
-    return { ...emptyPlan(), ...parsed };
+    return JSON.parse(readFileSync(path, 'utf8'));
   } catch (e) {
-    throw new Error(`${p} is not valid JSON (${e.message}). Move it aside to start fresh.`);
+    throw new Error(`${path} is not valid JSON for ${label} (${e.message}). Move it aside to start fresh.`);
   }
 }
 
-export function savePlan(root, plan) {
-  ensureStateDir(root);
+function writeJsonAtomic(path, value) {
+  mkdirSync(dirname(path), { recursive: true });
+  const tmp = path + '.tmp';
+  writeFileSync(tmp, JSON.stringify(value, null, 2));
+  renameSync(tmp, path);
+}
+
+export function loadPlan(root, dataDir = null) {
+  const p = planPath(root, dataDir);
+  if (!existsSync(p)) return emptyPlan();
+  const parsed = readJson(p, 'plan');
+  const plan = { ...emptyPlan(), ...parsed };
+  if (!Number.isInteger(plan.revision) || plan.revision < 0) {
+    throw new Error(`${p} has an invalid revision`);
+  }
+  if (!Array.isArray(plan.recentTransactions)) plan.recentTransactions = [];
+  return plan;
+}
+
+export function savePlan(root, plan, dataDir = null) {
+  ensureStateDir(root, dataDir);
   const out = {
     ...emptyPlan(),
     ...plan,
     version: PLAN_VERSION,
     savedAt: new Date().toISOString(),
   };
-  // Write-then-rename so an interrupted save can't truncate a good plan.
-  const p = planPath(root);
-  const tmp = p + '.tmp';
-  writeFileSync(tmp, JSON.stringify(out, null, 2));
-  renameSync(tmp, p);
+  if (!Number.isInteger(out.revision) || out.revision < 0) {
+    throw new Error('Cannot save a plan with an invalid revision');
+  }
+  out.recentTransactions = (out.recentTransactions || []).slice(-RECENT_TRANSACTION_LIMIT);
+  writeJsonAtomic(planPath(root, dataDir), out);
   return out;
+}
+
+export function loadView(root, dataDir = null, legacyUi = {}) {
+  const p = viewPath(root, dataDir);
+  if (!existsSync(p)) return emptyView(legacyUi);
+  const parsed = readJson(p, 'view');
+  const view = { ...emptyView(legacyUi), ...parsed };
+  view.ui = { ...legacyUi, ...(parsed.ui || {}) };
+  view.side = { mode: 'none', targetId: null, ...(parsed.side || {}) };
+  if (!Array.isArray(view.collapsed)) view.collapsed = [];
+  if (!Number.isInteger(view.revision) || view.revision < 0) {
+    throw new Error(`${p} has an invalid revision`);
+  }
+  return view;
+}
+
+export function saveView(root, view, dataDir = null) {
+  ensureStateDir(root, dataDir);
+  const out = {
+    ...emptyView(),
+    ...view,
+    version: VIEW_VERSION,
+    savedAt: new Date().toISOString(),
+    ui: { ...(view.ui || {}) },
+    collapsed: [...new Set(view.collapsed || [])].sort(),
+    side: { mode: 'none', targetId: null, ...(view.side || {}) },
+  };
+  if (!Number.isInteger(out.revision) || out.revision < 0) {
+    throw new Error('Cannot save a view with an invalid revision');
+  }
+  writeJsonAtomic(viewPath(root, dataDir), out);
+  return out;
+}
+
+export function loadScan(root, dataDir = null) {
+  const p = scanPath(root, dataDir);
+  if (!existsSync(p)) return null;
+  const value = readJson(p, 'scan');
+  if (!value || !Array.isArray(value.nodes) || typeof value.root !== 'string') {
+    throw new Error(`${p} does not contain a valid scan`);
+  }
+  return value;
+}
+
+export function saveScan(root, scanResult, dataDir = null) {
+  ensureStateDir(root, dataDir);
+  writeJsonAtomic(scanPath(root, dataDir), scanResult);
+  return scanResult;
+}
+
+export function loadWorkspace(root, dataDir = null) {
+  const p = workspacePath(root, dataDir);
+  if (!existsSync(p)) return null;
+  const value = readJson(p, 'workspace');
+  if (value.format !== 'reorg-workspace' || value.version !== WORKSPACE_VERSION || !value.id) {
+    throw new Error(`${p} has an unsupported workspace format`);
+  }
+  return value;
+}
+
+export function ensureWorkspace(root, dataDir = null) {
+  const dir = ensureStateDir(root, dataDir);
+  const existing = loadWorkspace(root, dir);
+  if (existing) return existing;
+  const now = new Date().toISOString();
+  const workspace = {
+    format: 'reorg-workspace',
+    version: WORKSPACE_VERSION,
+    id: randomUUID(),
+    root: resolvePath(root),
+    createdAt: now,
+    updatedAt: now,
+  };
+  writeJsonAtomic(workspacePath(root, dir), workspace);
+  return workspace;
+}
+
+export function saveWorkspace(root, workspace, dataDir = null) {
+  ensureStateDir(root, dataDir);
+  const out = {
+    ...workspace,
+    format: 'reorg-workspace',
+    version: WORKSPACE_VERSION,
+    updatedAt: new Date().toISOString(),
+  };
+  writeJsonAtomic(workspacePath(root, dataDir), out);
+  return out;
+}
+
+export function withWorkspaceLock(root, dataDir, fn) {
+  const dir = ensureStateDir(root, dataDir);
+  const path = join(dir, LOCK_FILE);
+  let fd;
+  try {
+    fd = openSync(path, 'wx', 0o600);
+  } catch (e) {
+    if (e.code === 'EEXIST') throw new Error(`Workspace is busy: ${path}`);
+    throw e;
+  }
+  try {
+    return fn();
+  } finally {
+    closeSync(fd);
+    unlinkSync(path);
+  }
+}
+
+export function logTransaction(root, entry, dataDir = null) {
+  ensureStateDir(root, dataDir);
+  appendFileSync(join(stateDir(root, dataDir), TRANSACTION_LOG_FILE), JSON.stringify(entry) + '\n');
 }
 
 /**
@@ -97,18 +281,21 @@ export function savePlan(root, plan) {
  * entry, once as a pending creation) and report a phantom collision. Notes and
  * summaries are kept -- they are observations about content, not pending moves.
  */
-export function clearAppliedPlan(root, sourcePlan = null) {
-  const plan = sourcePlan || loadPlan(root);
-  return savePlan(root, { ...plan, overrides: [], created: [] });
+export function clearAppliedPlan(root, sourcePlan = null, dataDir = null) {
+  const plan = sourcePlan || loadPlan(root, dataDir);
+  const revision = Number.isInteger(plan.revision) ? plan.revision + 1 : 1;
+  return savePlan(root, { ...plan, overrides: [], created: [], revision }, dataDir);
 }
 
 export function logLine(root, entry) {
-  ensureStateDir(root);
-  appendFileSync(join(stateDir(root), 'history.jsonl'), JSON.stringify(entry) + '\n');
+  const dir = recoveryDir(root);
+  mkdirSync(dir, { recursive: true });
+  selfIgnore(dir);
+  appendFileSync(join(dir, 'history.jsonl'), JSON.stringify(entry) + '\n');
 }
 
 export function listUndoScripts(root) {
-  const dir = stateDir(root);
+  const dir = recoveryDir(root);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .filter((f) => /^undo-\d+\.sh$/.test(f))
