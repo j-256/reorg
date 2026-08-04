@@ -129,6 +129,23 @@ test('-p is the short alias for --port', () => {
   }
 });
 
+test('explicitly empty CLI values are refused instead of targeting the current directory', () => {
+  const root = sandbox({ 'keep.txt': 'keep' });
+  try {
+    const emptyRoot = runCli(['inspect', '', '--json'], { cwd: root });
+    assert.equal(emptyRoot.status, 2);
+    assert.match(emptyRoot.stderr, /positional arguments cannot be empty/i);
+    assert.equal(existsSync(join(root, '.reorg')), false);
+
+    const emptyDataDir = runCli(['inspect', root, '--data-dir', '', '--json'], { cwd: root });
+    assert.equal(emptyDataDir.status, 2);
+    assert.match(emptyDataDir.stderr, /--data-dir requires a non-empty value/i);
+    assert.equal(existsSync(join(root, '.reorg')), false);
+  } finally {
+    cleanup(root);
+  }
+});
+
 test('an exported plan dry-runs and applies through the CLI without a directory argument', () => {
   const root = sandbox({ 'keep.txt': 'keep' });
   const exchange = sandbox({});

@@ -8,10 +8,11 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
-import { createReorgServer } from '../src/server.js';
+import { createReorgServer, listenOnAvailablePort } from '../src/server.js';
 import { acquireWorkspaceLock } from '../src/state.js';
 import { sandbox, cleanup } from './helpers.js';
 
@@ -72,6 +73,28 @@ async function mutate(s, commands, extra = {}) {
   assert.equal(res.status, 200);
   return res.json();
 }
+
+function closeServer(server) {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
+}
+
+test('available-port fallback reports the port it actually binds', async () => {
+  const occupied = createServer();
+  const candidate = createServer();
+  await new Promise((resolve) => occupied.listen(0, '127.0.0.1', resolve));
+  const occupiedPort = occupied.address().port;
+  try {
+    const reportedPort = await listenOnAvailablePort(candidate, occupiedPort);
+    assert.notEqual(reportedPort, occupiedPort);
+    assert.equal(reportedPort, candidate.address().port);
+  } finally {
+    await closeServer(candidate);
+    await closeServer(occupied);
+  }
+});
 
 test('the API is unreachable without the run token', async () => {
   const s = await serve(TREE);

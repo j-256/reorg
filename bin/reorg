@@ -17,7 +17,7 @@ import { dirname, join, resolve as resolvePath } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { spawn } from 'node:child_process';
-import { createReorgServer } from '../src/server.js';
+import { createReorgServer, listenOnAvailablePort } from '../src/server.js';
 import { scan, readGitignore, formatBytes } from '../src/scan.js';
 import {
   LOCK_FILE,
@@ -151,6 +151,10 @@ function parseArgs(argv) {
         console.error(`reorg: ${a} requires a value\nTry: reorg --help`);
         process.exit(2);
       }
+      if (next === '') {
+        console.error(`reorg: ${a} requires a non-empty value\nTry: reorg --help`);
+        process.exit(2);
+      }
       i++;
       return next;
     };
@@ -182,7 +186,13 @@ function parseArgs(argv) {
     else if (a.startsWith('-')) {
       console.error(`reorg: unknown option ${a}\nTry: reorg --help`);
       process.exit(2);
-    } else opts._.push(a);
+    } else {
+      if (a === '') {
+        console.error('reorg: positional arguments cannot be empty\nTry: reorg --help');
+        process.exit(2);
+      }
+      opts._.push(a);
+    }
   }
   return opts;
 }
@@ -409,25 +419,6 @@ function openBrowser(url) {
   } catch {
     /* headless or no handler; the URL is already printed */
   }
-}
-
-function listen(server, port, host = '127.0.0.1', tries = 20) {
-  return new Promise((done, fail) => {
-    const attempt = (p, left) => {
-      const onError = (e) => {
-        if (e.code === 'EADDRINUSE' && left > 0) {
-          server.removeListener('error', onError);
-          attempt(p + 1, left - 1);
-        } else fail(e);
-      };
-      server.once('error', onError);
-      server.listen(p, host, () => {
-        server.removeListener('error', onError);
-        done(p);
-      });
-    };
-    attempt(port, tries);
-  });
 }
 
 function printOps(ops, stats) {
@@ -1004,7 +995,10 @@ async function main() {
     dataDir: serverDataDir,
     scanOptions: scanOpts(opts),
   });
-  const port = await listen(server, Number.isFinite(opts.port) ? opts.port : 7777);
+  const port = await listenOnAvailablePort(
+    server,
+    Number.isFinite(opts.port) ? opts.port : 7777
+  );
   const url = `http://127.0.0.1:${port}/?token=${token}`;
 
   console.log(`reorg  ${root}`);

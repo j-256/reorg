@@ -98,6 +98,29 @@ function safeJoin(root, relPath) {
   return abs;
 }
 
+export function listenOnAvailablePort(server, port, host = '127.0.0.1', retries = 20) {
+  return new Promise((resolve, reject) => {
+    const attempt = (candidate, remaining) => {
+      const onListening = () => {
+        server.removeListener('error', onError);
+        resolve(candidate);
+      };
+      const onError = (error) => {
+        server.removeListener('listening', onListening);
+        if (error.code === 'EADDRINUSE' && remaining > 0) {
+          attempt(candidate + 1, remaining - 1);
+        } else {
+          reject(error);
+        }
+      };
+      server.once('error', onError);
+      server.once('listening', onListening);
+      server.listen(candidate, host);
+    };
+    attempt(port, retries);
+  });
+}
+
 export function createReorgServer({
   root,
   dataDir = null,
