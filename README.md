@@ -69,6 +69,7 @@ npm ci && npx playwright install chromium
 | Command | What it does |
 |---|---|
 | `reorg [dir]` | scan, serve the planner, open a browser |
+| `reorg [dir] --allow-apply` | enable confirmation-protected browser apply for this server session |
 | `reorg [dir] --static` | write and open a self-contained planner with no server |
 | `reorg plan [dir]` | print the current plan as operations |
 | `reorg apply [dir]` | dry run: print what would happen, change nothing |
@@ -112,7 +113,7 @@ The planner targets WCAG 2.2 AA overall and adds AAA enhancements where they imp
 
 ## Shared workspace and AI agents
 
-The browser, CLI, and an AI agent use one authoritative workspace. The browser does not replace `plan.json`, and an agent should not edit any state file directly. Browser and agent edits submit semantic commands through the same revision-checked command layer, while filesystem paths remain unchanged until the separate `reorg apply --yes` command runs.
+The browser, CLI, and an AI agent use one authoritative workspace. The browser submits semantic commands through the token-gated server API. An agent submits the same command vocabulary through `reorg mutate` and `reorg view`; it should never edit a state file directly. Both paths reach the same revision-checked command layer, while filesystem paths remain unchanged until an explicitly authorized apply runs.
 
 The workspace contains related state with different jobs:
 
@@ -206,7 +207,7 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 
 ![Review panel listing the resolved operations in order, with a run safety check button](docs/review.png)
 
-- **Dry run is the default.** `reorg apply` prints and exits. Only the explicit CLI command `reorg apply --yes` moves anything; the browser and its HTTP API cannot apply.
+- **Dry run is the default.** `reorg apply` prints and exits. The browser starts without apply capability; `reorg --allow-apply` enables a confirmation-protected Apply button for that server session. The terminal requires the separate `reorg apply --yes` command.
 - **Nothing is deleted.** "Trash" moves into `.reorg/trash/<run>/`. Emptying that is a separate decision you make yourself.
 - **Drift aborts the whole batch.** Every source path is checked to still exist and every destination to be free *before* the first move. If the tree changed since the scan, nothing is applied – not "nothing further", nothing at all.
 - **An undo script is written before execution starts**, so even a crash mid-run leaves a way back. It is guarded per step, so running it after a partial apply undoes only what happened.
@@ -314,7 +315,7 @@ npm test
      that path as an attack signature -- npm then reports the block as a generic
      E403 that names no cause. See ## Releasing. -->
 
-`reorg` serves on loopback with a per-run token in the URL. That is not theatre: the API can read file contents and mutate the shared plan and view, although it cannot move source files. A token means another process on the machine, or a stray browser tab, cannot drive it. Path parameters are confined to the scan root, so `../../.ssh/id_rsa` is rejected rather than served.
+`reorg` serves on loopback with a per-run token in the URL. That is not theatre: the API can read file contents and mutate the shared plan and view. It can move source files only when the server was explicitly started with `--allow-apply`, after Review and an in-browser confirmation. A token means another process on the machine, or a stray browser tab, cannot drive it. Path parameters are confined to the scan root, so `../../.ssh/id_rsa` is rejected rather than served.
 
 ## Releasing
 
@@ -339,8 +340,9 @@ Manual dispatches from a branch cannot publish even when `dry_run` is unchecked:
 The post-release workflow can also be exercised without changing a GitHub release. Give it the successful publish-workflow run that contains the preserved artifact and an existing published tag; `create_release` defaults to false:
 
 ```bash
+release_tag="v$(node -p 'require("./package.json").version')"
 publish_run="$(gh run list --workflow release.yml --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')"
-gh workflow run post-release.yml -f source_run_id="$publish_run" -f tag=v0.3.1
+gh workflow run post-release.yml -f source_run_id="$publish_run" -f tag="$release_tag"
 ```
 
 If the publish workflow fails before npm accepts the upload – a bad tag, a failed test, or an authentication error – that registry version remains available and you can move the tag onto the fix:
@@ -354,7 +356,7 @@ That moves the tag to whatever `main` currently points at, so push the fix first
 `retag` only works when the tag actually moves. If the tag already points at the commit you want – a run that failed for a reason outside the repo, say a registry outage – the force-push is a no-op, git prints `Everything up-to-date`, and **no workflow runs**: Actions fires on a ref change, and nothing changed. Re-run the same commit by dispatching against the tag instead:
 
 ```bash
-gh workflow run release.yml --ref v0.1.0 -f dry_run=false
+gh workflow run release.yml --ref "v$(node -p 'require("./package.json").version')" -f dry_run=false
 ```
 
 The `dry_run=false` is required – dispatch defaults to a dry run, which publishes nothing. Unlike a dispatch from a branch, this one has a tag, so both tag checks run and publication is allowed. A manually dispatched recovery does not start post-release automation; after publication succeeds, dispatch `post-release.yml` with the publish run id, the tag, and `create_release=true`.

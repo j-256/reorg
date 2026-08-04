@@ -123,87 +123,91 @@ const shot = (page, name) =>
 async function main() {
   mkdirSync(OUT, { recursive: true });
   const root = buildTree();
-  const { server, token } = createReorgServer({ root, allowApply: false });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  let server;
+  let browser;
+  try {
+    const started = createReorgServer({ root, allowApply: false });
+    server = started.server;
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
 
-  const browser = await chromium.launch();
-  const context = await browser.newContext({
-    viewport: VIEWPORT,
-    deviceScaleFactor: 2, // retina: the UI is dense, and 1x makes the type mushy
-    colorScheme: 'dark',
-  });
-  const page = await context.newPage();
-  await page.goto(`${base}/?token=${token}`);
-  await page.waitForSelector('.row');
+    browser = await chromium.launch();
+    const context = await browser.newContext({
+      viewport: VIEWPORT,
+      deviceScaleFactor: 2, // retina: the UI is dense, and 1x makes the type mushy
+      colorScheme: 'dark',
+    });
+    const page = await context.newPage();
+    await page.goto(`${base}/?token=${started.token}`);
+    await page.waitForSelector('.row');
 
-  // The root label is a temp path; swap it for something that reads like a real
-  // one. Cosmetic only -- everything else in the shot is genuine output.
-  await page.evaluate(() => {
-    const el = document.querySelector('#rootLabel');
-    if (el) el.textContent = '~/Downloads';
-  });
+    // The root label is a temp path; swap it for something that reads like a real
+    // one; cosmetic only -- everything else in the shot is genuine output
+    await page.evaluate(() => {
+      const el = document.querySelector('#rootLabel');
+      if (el) el.textContent = '~/Downloads';
+    });
 
-  console.log('capturing into', OUT);
+    console.log('capturing into', OUT);
 
-  // 1. The planner mid-edit: a plan in progress, so the badges and footer counts
-  //    are populated and the reader can see what the tool is for.
-  await page.evaluate(async () => {
-    const edit = await import('/lib/plan-edit.js');
-    edit.addDir('.');
-    const { store } = await import('/lib/store.js');
-    const created = [...store.nodes.values()].find((n) => !n.orig);
-    edit.renameNode(created.id, 'archive');
-    edit.moveNode('project-backup-20260415', created.id);
-    edit.moveNode('Docker.dmg', created.id);
-    edit.toggleEvict('scratch.log');
-    edit.toggleEvict('old-notes-presync.txt');
-    edit.toggleCollapse('node-v24.18.0-darwin-arm64');
-    // plan-edit.js is deliberately DOM-free, so nothing above repaints on its own.
-    // markDirty() is what app.js calls after a real edit: it re-renders and kicks
-    // the debounced save, which is exactly the state a mid-edit screenshot wants.
-    const app = await import('/app.js');
-    app.markDirty();
-  });
-  await page.waitForTimeout(500);
-  await shot(page, 'planner.png');
+    // 1. The planner mid-edit: a plan in progress, so the badges and footer counts
+    //    are populated and the reader can see what the tool is for
+    await page.evaluate(async () => {
+      const edit = await import('/lib/plan-edit.js');
+      const app = await import('/app.js');
+      const submit = (result) => app.markDirty(result.command);
+      const created = edit.addDir('.');
+      submit(created);
+      submit(edit.renameNode(created.id, 'archive'));
+      submit(edit.moveNode('project-backup-20260415', created.id));
+      submit(edit.moveNode('Docker.dmg', created.id));
+      submit(edit.toggleEvict('scratch.log'));
+      submit(edit.toggleEvict('old-notes-presync.txt'));
+      edit.toggleCollapse('node-v24.18.0-darwin-arm64');
+      app.markViewDirty();
+      app.renderAll();
+      await app.flushPlan();
+    });
+    await page.waitForTimeout(500);
+    await shot(page, 'planner.png');
 
-  // 2. Move: create one missing destination, then show that the same control can
-  //    immediately extend it with another nested folder
-  await page.evaluate(async () => {
-    const app = await import('/app.js');
-    app.openMoveDialog('invoice-april.pdf');
-  });
-  await page.locator('#moveTarget').selectOption({ label: 'archive' });
-  await page.locator('#moveCreateName').fill('invoices');
-  await page.getByRole('button', { name: 'Create and select' }).click();
-  await page.locator('#moveCreateName').fill('2026');
-  await page.waitForTimeout(250);
-  await shot(page, 'move.png');
-  await page.keyboard.press('Escape');
-  await page.waitForFunction(() => !document.querySelector('#moveDialog')?.open);
-  await page.waitForFunction(() => !document.querySelector('#toast')?.classList.contains('show'));
+    // 2. Move: create one missing destination, then show that the same control can
+    //    immediately extend it with another nested folder
+    await page.evaluate(async () => {
+      const app = await import('/app.js');
+      app.openMoveDialog('invoice-april.pdf');
+    });
+    await page.locator('#moveTarget').selectOption({ label: 'archive' });
+    await page.locator('#moveCreateName').fill('invoices');
+    await page.getByRole('button', { name: 'Create and select' }).click();
+    await page.locator('#moveCreateName').fill('2026');
+    await page.waitForTimeout(250);
+    await shot(page, 'move.png');
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(() => !document.querySelector('#moveDialog')?.open);
+    await page.waitForFunction(() => !document.querySelector('#toast')?.classList.contains('show'));
 
-  // 3. Triage: the panel that ranks disposable entries and says why
-  await page.evaluate(async () => {
-    const side = await import('/lib/side.js');
-    side.showTriage();
-  });
-  await page.waitForTimeout(600);
-  await shot(page, 'triage.png');
+    // 3. Triage: the panel that ranks disposable entries and says why
+    await page.evaluate(async () => {
+      const side = await import('/lib/side.js');
+      side.showTriage();
+    });
+    await page.waitForTimeout(600);
+    await shot(page, 'triage.png');
 
-  // 4. Review: the resolved operations, which is the safety story in one frame
-  await page.evaluate(async () => {
-    const side = await import('/lib/side.js');
-    side.showReview();
-  });
-  await page.waitForTimeout(900);
-  await shot(page, 'review.png');
-
-  await browser.close();
-  await new Promise((r) => server.close(r));
-  rmSync(root, { recursive: true, force: true });
-  console.log('done');
+    // 4. Review: the resolved operations, which is the safety story in one frame
+    await page.evaluate(async () => {
+      const side = await import('/lib/side.js');
+      side.showReview();
+    });
+    await page.waitForTimeout(900);
+    await shot(page, 'review.png');
+    console.log('done');
+  } finally {
+    if (browser) await browser.close();
+    if (server?.listening) await new Promise((r) => server.close(r));
+    rmSync(root, { recursive: true, force: true });
+  }
 }
 
 main().catch((e) => {
