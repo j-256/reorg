@@ -76,6 +76,14 @@ npm ci && npx playwright install chromium
 | `reorg apply --plan FILE` | dry-run a plan exported by a static planner |
 | `reorg undo [dir]` | run the most recent undo script |
 | `reorg status [dir]` | what is planned, applied, and undoable |
+| `reorg inspect [dir] --json` | return the frozen scan, semantic plan, shared view, effective presentation, and resolved operations |
+| `reorg rescan [dir] --json` | refresh the canonical frozen scan without changing source files |
+| `reorg mutate [dir] --input FILE` | apply revision-checked semantic plan commands |
+| `reorg view [dir] --input FILE` | update filters, collapse state, selection, and side-panel state |
+| `reorg view [dir] --focus ID` | reveal and select one stable node id |
+| `reorg schema` | print the machine-readable collaboration contract |
+| `reorg state move DEST --data-dir SOURCE` | relocate a stopped workspace data directory |
+| `reorg state rebind NEW_ROOT --data-dir DIR` | validate and bind state to a relocated source directory |
 | `reorg summarize [dir]` | one-line AI description per file (see below) |
 | `reorg triage [dir]` | rank likely-disposable entries and say why |
 | `reorg --version` | print the installed reorg version |
@@ -96,11 +104,79 @@ In the planner:
 - **Press `/`** to jump to the filter box; wrap the query in slashes for a regex (`/\.log$/`). Invalid expressions are explained without hiding the tree.
 - **Press `?`** to list every key.
 
-Toolbar toggles persist in the plan, so the view you set up is the view you come back to: **git status** tints rows by git status, **sizes** draws a size bar on each row, and **theme** cycles `system` through forced `dark` and `light`.
+Toolbar toggles persist in shared view state, so the view you set up is the view the browser, CLI, and an AI agent can inspect: **git status** tints rows by git status, **sizes** draws a size bar on each row, and **theme** cycles `system` through forced `dark` and `light`.
 
 Sibling order is *derived* (folders first, then natural sort), never stored. Dragging something out of a folder and back is a genuine no-op rather than a phantom "reordered" change.
 
 The planner targets WCAG 2.2 AA overall and adds AAA enhancements where they improve the experience without changing the product's compact structure. Normal and large text meet the AAA enhanced contrast thresholds in both themes, while controls meet the AA minimum target size rather than the larger AAA target. The tree, menus, dialogs, panels, status messages, focus movement, narrow single-pane layout, and reduced-motion behavior are all covered by browser tests.
+
+## Shared workspace and AI agents
+
+The browser, CLI, and an AI agent use one authoritative workspace. The browser does not replace `plan.json`, and an agent should not edit any state file directly. Browser and agent edits submit semantic commands through the same revision-checked command layer, while filesystem paths remain unchanged until the separate `reorg apply --yes` command runs.
+
+The workspace contains related state with different jobs:
+
+| File | Role |
+|---|---|
+| `workspace.json` | stable workspace id and source-root binding |
+| `scan.json` | the frozen directory scan all collaborators organize |
+| `plan.json` | the revisioned semantic diff, notes, summaries, and idempotency records |
+| `view.json` | the independently revisioned filters, collapsed folders, selection, theme, and side panel |
+| `transactions.jsonl` | append-only attribution and command history for plan changes |
+
+`reorg inspect --json` answers both "what is planned?" and "what is reorg displaying?". Its projection explains whether each node is visible, filtered, hidden under a collapsed ancestor, dimmed by a change filter, muted as git-ignored, selected, or shown with size tinting. It also returns recent attributed plan transactions and the exact ordered operations the canonical plan resolves to.
+
+`reorg inspect` deliberately reads the frozen scan rather than silently replacing it with the live filesystem. Starting the browser also reuses an existing frozen scan unless explicit scan options request a new one. Use `reorg rescan --json` when a collaborator intentionally wants to refresh that shared baseline; a running browser adopts the new scan through the same workspace.
+
+An agent can discover the accepted command shapes instead of relying on prompt prose:
+
+```bash
+reorg schema
+reorg inspect ~/Downloads --json
+```
+
+Then it can submit one atomic, idempotent transaction. Supplying the revision returned by `inspect` makes stale intent fail instead of overwriting another collaborator:
+
+```bash
+reorg mutate ~/Downloads --input - --json <<'JSON'
+{
+  "expectedRevision": 4,
+  "transactionId": "organize-writing-1",
+  "actor": "codex",
+  "commands": [
+    { "type": "create-folder", "id": "new:writing", "parentId": ".", "name": "Writing" },
+    { "type": "move", "id": "draft.md", "parentId": "new:writing" }
+  ]
+}
+JSON
+```
+
+The transaction changes planning state only. Reusing its id with the same commands is safe; reusing it for different commands is rejected. A plan may temporarily contain a collision while a later command fixes it, but `reorg apply` refuses unresolved problems. Use `reorg view --focus draft.md` when the agent should reveal the same entry in the browser without changing the plan.
+
+With `--json`, command failures are emitted as one JSON object on stderr. `revision-conflict` means the agent should inspect again before reconsidering its intent; `workspace-busy` is retryable with the same transaction id; `idempotency-conflict` means that id was reused for different commands.
+
+By default the workspace lives in `<root>/.reorg`. Put it elsewhere when the planning data should travel independently:
+
+```bash
+reorg ~/Downloads --data-dir ~/reorg-data/downloads
+reorg inspect --data-dir ~/reorg-data/downloads --json
+```
+
+An external data directory must be outside the reorganized root. Its own path is not embedded, so moving only that data does not require rebinding:
+
+```bash
+reorg state move ~/archive/reorg-downloads --data-dir ~/reorg-data/downloads
+```
+
+Stop the browser server before moving or copying workspace data; a live server lease makes `state move` and `state rebind` refuse rather than split the source of truth. If the source directory itself moves, rebind after the move. Rebind compares relative ids, entry kinds, sizes, collapsed-directory totals, and link targets against the frozen scan before changing the binding; a truncated scan is refused because it cannot validate the whole displayed baseline:
+
+```bash
+reorg state rebind /Volumes/Archive/Downloads --data-dir ~/archive/reorg-downloads
+```
+
+Apply recovery is deliberately not portable workspace data. Undo scripts, staging, and trashed entries always stay in `<root>/.reorg` beside the filesystem they can restore, even when `--data-dir` points elsewhere. Moving the default workspace splits out its portable files and leaves those recovery artifacts in place; moving it back merges the portable files without disturbing recovery.
+
+After `reorg undo`, the CLI refreshes any workspace found at the selected `--data-dir`, and a running browser adopts that scan. Pass the external data directory when undoing a source whose portable workspace does not live at the default path.
 
 ## Static planner
 
@@ -113,14 +189,14 @@ reorg ~/Downloads -s -o downloads-plan.html
 
 Without `--output`, reorg writes a temporary HTML file and opens it. The page is self-contained: the tree, cleanup candidates, bounded file previews, styles, and browser code are all embedded, so it can be moved and opened directly with a `file://` URL. An explicit output path is never overwritten.
 
-The tradeoff is that a static page cannot rescan the directory, autosave to `.reorg/plan.json`, check the live filesystem, or apply anything. Edits stay in the page until **Review plan** exports `reorg-plan.json` by download or clipboard. Feed that export back to the CLI:
+The tradeoff is that a static page cannot rescan the directory, autosave to the shared workspace, check the live filesystem, or apply anything. Edits stay in the page until **Review plan** exports `reorg-plan.json` by download or clipboard. Feed that export back to the CLI:
 
 ```bash
 reorg apply --plan ~/Downloads/reorg-plan.json # drift-checked dry run
 reorg apply --plan ~/Downloads/reorg-plan.json --yes # write undo script, then apply
 ```
 
-The export carries both the plan and the scan it was drawn against, including the source root. That lets the CLI preserve every intended operation and refuse the batch if a source disappeared or a destination became occupied. Pass an explicit directory after `apply` to use that directory instead of the embedded root. `--plan -` reads the same JSON from standard input.
+The export carries the plan, the scan it was drawn against, and the effective view, including the source root. That lets the CLI preserve every intended operation and refuse the batch if a source disappeared or a destination became occupied. Pass an explicit directory after `apply` to use that directory instead of the embedded root. `--plan -` reads the same JSON from standard input.
 
 A static page contains filenames, metadata, summaries, and the embedded file previews. Treat it like the directory data it captures when copying or sharing it.
 
@@ -130,7 +206,7 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 
 ![Review panel listing the resolved operations in order, with a run safety check button](docs/review.png)
 
-- **Dry run is the default.** `reorg apply` prints and exits. Only `--yes` moves anything. The browser cannot apply at all unless you started it with `--allow-apply`.
+- **Dry run is the default.** `reorg apply` prints and exits. Only the explicit CLI command `reorg apply --yes` moves anything; the browser and its HTTP API cannot apply.
 - **Nothing is deleted.** "Trash" moves into `.reorg/trash/<run>/`. Emptying that is a separate decision you make yourself.
 - **Drift aborts the whole batch.** Every source path is checked to still exist and every destination to be free *before* the first move. If the tree changed since the scan, nothing is applied – not "nothing further", nothing at all.
 - **An undo script is written before execution starts**, so even a crash mid-run leaves a way back. It is guarded per step, so running it after a partial apply undoes only what happened.
@@ -138,7 +214,7 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 - **`git mv` for tracked files**, so history follows the move. (Git refuses this on a fully-untracked directory; reorg falls back to a plain rename there.)
 - **Rename cycles work.** Swapping two names is impossible with direct renames in any order, so reorg routes cycle members through a staging directory instead of failing.
 
-Your plan lives in `.reorg/plan.json`, which is a diff against the scan rather than a copy of the tree. `.reorg/` git-ignores itself on creation, so planning a repo's layout never dirties that repo.
+The semantic plan remains a diff against the frozen scan rather than a second copy of the tree. The default `.reorg/` workspace git-ignores itself on creation, so planning a repo's layout never dirties that repo.
 
 ## File summaries
 
@@ -148,7 +224,7 @@ Two ways to get them, and the default needs no API key:
 
 ```bash
 # Agent path: writes a prompt pack, your coding agent fills it in. Free.
-reorg summarize ~/Downloads          # -> .reorg/summarize.md + summaries.json
+reorg summarize ~/Downloads          # -> <data-dir>/summarize.md + summaries.json
 #   ...point Claude Code (or any agent) at that markdown file...
 reorg summarize --ingest ~/Downloads
 
@@ -158,7 +234,7 @@ ANTHROPIC_API_KEY=sk-... reorg summarize ~/Downloads
 
 The API path batches files (about a dozen per request), sends only the first few KB of each, skips binaries and empty files, and defaults to Haiku because this is a classification job. Override with `--model`. It uses `fetch` against the documented HTTP API – no SDK dependency.
 
-Summaries are stored in the plan and keyed by path, so they survive a rescan.
+Summaries are stored in the plan and keyed by stable node id, so they survive a rescan. After an apply renames or moves an entry, reorg remaps its summary and notes to the resulting path before refreshing the frozen scan.
 
 ## Triage: what looks disposable
 
@@ -212,12 +288,15 @@ Move ordering is a topological sort over two constraints: vacate before occupy (
 bin/reorg          CLI: scan, serve or build static, plan, apply, undo, summarize, status
 src/scan.js        walk a directory, tag git status, summarize collapsed dirs
 src/plan.js        pure resolver: plan -> ordered operations (no fs, no exec)
+src/commands.js    revisioned semantic plan transactions and idempotency
+src/view.js        effective presentation projection and shared view transactions
+src/schema.js      machine-readable collaboration contract
 src/apply.js       execute, with drift checks, git mv, trash, undo script
 src/summarize.js   Messages API batching + the no-key agent prompt pack
 src/signals.js     cleanup signals: what looks disposable, and why (name, not age)
 src/server.js      stdlib http server, token-gated JSON API
 src/static.js      build a self-contained planner with an embedded read-only API
-src/state.js       .reorg/plan.json load, save, self-ignore
+src/state.js       portable workspace persistence, locks, leases, and recovery paths
 web/               the planner: tree, drag and drop, preview, review
 test/              unit tests for the resolver, integration tests on real temp dirs
 ```
@@ -235,7 +314,7 @@ npm test
      that path as an attack signature -- npm then reports the block as a generic
      E403 that names no cause. See ## Releasing. -->
 
-`reorg` serves on loopback with a per-run token in the URL. That is not theatre: the API can read file contents and, with `--allow-apply`, move files. A token means another process on the machine, or a stray browser tab, cannot drive it. Path parameters are confined to the scan root, so `../../.ssh/id_rsa` is rejected rather than served.
+`reorg` serves on loopback with a per-run token in the URL. That is not theatre: the API can read file contents and mutate the shared plan and view, although it cannot move source files. A token means another process on the machine, or a stray browser tab, cannot drive it. Path parameters are confined to the scan root, so `../../.ssh/id_rsa` is rejected rather than served.
 
 ## Releasing
 
