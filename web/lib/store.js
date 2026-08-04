@@ -24,10 +24,12 @@ export const store = {
   recentTransactionDigests: {},
   selectedId: null,
   sideView: { mode: 'none', targetId: null },
+  allowApply: false,
   static: false,
   undoScripts: [],
 
   init(data) {
+    this.allowApply = !!data.allowApply;
     this.static = !!data.static;
     this.undoScripts = data.undoScripts || [];
     this.applyScan(data.scan, data.plan || {}, data.view || null);

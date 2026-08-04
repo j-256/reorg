@@ -32,7 +32,7 @@ export async function closeBrowser() {
  */
 export async function planner(layout, opts = {}) {
   const root = sandbox(layout);
-  const { server, token } = createReorgServer({ root });
+  const { server, token } = createReorgServer({ root, allowApply: !!opts.allowApply });
   await new Promise((done) => server.listen(0, '127.0.0.1', done));
   const base = `http://127.0.0.1:${server.address().port}`;
 

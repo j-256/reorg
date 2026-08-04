@@ -85,6 +85,8 @@ export function markDirty(command) {
 
 async function reloadFromServer(message = '') {
   const data = await api.get('/api/tree');
+  store.allowApply = !!data.allowApply;
+  store.undoScripts = data.undoScripts || [];
   store.applyScan(data.scan, data.plan || {}, data.view || null);
   store.savedAt = data.plan?.savedAt || null;
   saveState = 'clean';
@@ -983,6 +985,35 @@ export async function runSafetyCheck() {
   }
 }
 
+export async function runApply() {
+  try {
+    await flushPlan();
+    await flushView();
+    if (retryBatch) throw new Error('The pending plan edit must be saved before applying');
+    const res = await api.post('/api/apply', {
+      dryRun: false,
+      expectedRevision: store.planRevision,
+      expectedScanId: store.scan.id,
+    });
+    await reloadFromServer();
+    showReview(null, res.log, {
+      applied: res.applied,
+      undo: res.undoPath,
+      trash: res.trashRoot,
+    });
+    toast(`Applied ${res.applied} operation(s). Undo: bash ${res.undoPath}`);
+  } catch (e) {
+    if (e.payload?.problems?.length) {
+      showReview(e.payload.problems.map((problem) =>
+        typeof problem === 'string' ? { message: problem } : problem
+      ));
+      toast('The tree changed since the scan, so nothing was applied. Rescan and retry.', true);
+      return;
+    }
+    toast(`Apply failed: ${e.message}`, true);
+  }
+}
+
 function activateNode(n) {
   if (n.kind === 'file') {
     showPreview(n.id);
@@ -1200,6 +1231,9 @@ function renderScopeBanner() {
   if (store.static) {
     lead.textContent = 'Static snapshot: ';
     detail = 'changes stay in this page until you export from Review; this page cannot rescan or move files';
+  } else if (store.allowApply) {
+    lead.textContent = 'Plan first: ';
+    detail = 'browser actions update the shared workspace; files move only after Review, Apply, and confirmation';
   } else {
     lead.textContent = 'Planning only: ';
     detail = 'browser actions update the shared workspace; files stay on disk until you run reorg apply --yes';

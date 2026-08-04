@@ -94,6 +94,16 @@ export function pathOf(nodes, id) {
   return parts.join('/');
 }
 
+/** Map stable node ids to their paths after a successful apply */
+export function appliedIdMap(scanResult, plan) {
+  const nodes = buildNodes(scanResult, plan);
+  const ids = new Map();
+  for (const node of nodes.values()) {
+    if (!node.evicted) ids.set(node.id, pathOf(nodes, node.id));
+  }
+  return ids;
+}
+
 export function changesOf(n) {
   const out = [];
   if (!n.orig) return n.evicted ? ['new', 'trashed'] : ['new'];

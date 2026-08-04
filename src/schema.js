@@ -78,8 +78,10 @@ export function collaborationSchema() {
       rebindRoot: 'reorg state rebind NEW_ROOT --data-dir DIR',
     },
     safety: {
+      directStateFileMutationSupported: false,
       stateCommandsModifySourceFilesystem: false,
-      browserCanModifySourceFilesystem: false,
+      browserApplyEnabledByDefault: false,
+      browserApplyEnableFlag: '--allow-apply',
       filesystemApplyCommand: 'reorg apply [dir] --yes [--data-dir DIR]',
     },
     errors: {

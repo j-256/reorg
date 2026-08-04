@@ -717,7 +717,7 @@ test('CLI agent edits and browser presentation converge on the same inspectable 
 
 /* ---------------------------------------------------------------- apply gate */
 
-test('the browser cannot apply filesystem changes, and points to the CLI', async () => {
+test('the default browser cannot apply filesystem changes and explains how to opt in', async () => {
   const p = await planner(TREE);
   try {
     await dragRow(p.page, 'keep.txt', 'docs', 'into');
@@ -731,7 +731,35 @@ test('the browser cannot apply filesystem changes, and points to the CLI', async
       }
     });
     assert.equal(res.ok, false);
-    assert.match(res.message, /reorg apply --yes/);
+    assert.match(res.message, /--allow-apply/);
+  } finally {
+    await p.close();
+  }
+});
+
+test('an apply-enabled browser confirms, applies, and adopts the refreshed workspace', async () => {
+  const p = await planner(TREE, { allowApply: true });
+  try {
+    await dragRow(p.page, 'keep.txt', 'docs', 'into');
+    await p.settled();
+    await p.page.getByRole('button', { name: 'review plan', exact: true }).click();
+    const applyButton = p.page.getByRole('button', {
+      name: 'apply 1 operation(s) to disk',
+      exact: true,
+    });
+    await applyButton.waitFor();
+    p.page.once('dialog', async (dialog) => {
+      assert.match(dialog.message(), /undo script is written/i);
+      await dialog.accept();
+    });
+    await applyButton.click();
+    await p.page.waitForSelector('text=Applied 1 operation(s).');
+
+    assert.ok(existsSync(join(p.root, 'docs/keep.txt')));
+    assert.equal(existsSync(join(p.root, 'keep.txt')), false);
+    assert.equal(await p.node('keep.txt'), null);
+    assert.ok(await p.node('docs/keep.txt'));
+    assert.deepEqual((await p.savedPlan()).overrides, []);
   } finally {
     await p.close();
   }

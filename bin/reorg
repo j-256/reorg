@@ -39,8 +39,7 @@ import {
   withWorkspaceLock,
 } from '../src/state.js';
 import {
-  buildNodes,
-  pathOf,
+  appliedIdMap,
   resolve as resolvePlan,
   describeOp,
 } from '../src/plan.js';
@@ -97,6 +96,7 @@ OPTIONS
   -o, --output FILE  with --static: write FILE instead of a temporary page
   --plan FILE        with 'apply': read an exported plan; use - for stdin
   --data-dir DIR     store portable scan, plan, view, and history outside the root
+  --allow-apply      enable browser apply for this server session; off by default
   --input FILE       with 'mutate' or 'view': read JSON input; use - for stdin
   --expected-revision N  reject a stale plan or view mutation
   --transaction-id ID   idempotency key for a plan mutation
@@ -137,7 +137,8 @@ SAFETY
   Nothing is deleted. "Trash" moves into .reorg/trash/<run>/, recoverable by the
   undo script. Every apply writes .reorg/undo-<run>.sh before it starts, and
   aborts entirely if the tree changed since the scan. The browser can change
-  planning state and run safety checks, but only reorg apply --yes moves files.
+  planning state and run safety checks. Browser apply requires --allow-apply;
+  terminal apply requires reorg apply --yes.
   Shared state defaults to .reorg or moves outside the root with --data-dir.
 `;
 
@@ -162,6 +163,7 @@ function parseArgs(argv) {
     else if (a === '-v' || a === '--version') opts.version = true;
     else if (a === '--no-open') opts.open = false;
     else if (a === '--static' || a === '-s') opts.static = true;
+    else if (a === '--allow-apply') opts.allowApply = true;
     else if (a === '--yes' || a === '-y') opts.yes = true;
     else if (a === '--all') opts.all = true;
     else if (a === '--no-hidden') opts.hidden = false;
@@ -460,15 +462,6 @@ function loadResolved(root, opts, imported = null) {
   return { ...resolved, plan, scan: s, dataDir: opened?.dataDir || validateDataDir(root, opts.dataDir) };
 }
 
-function appliedIdMap(scanResult, plan) {
-  const nodes = buildNodes(scanResult, plan);
-  const ids = new Map();
-  for (const node of nodes.values()) {
-    if (!node.evicted) ids.set(node.id, pathOf(nodes, node.id));
-  }
-  return ids;
-}
-
 async function main() {
   const argv = process.argv.slice(2);
   const opts = parseArgs(argv);
@@ -491,6 +484,12 @@ async function main() {
   }
   if (opts.static && cmd !== 'serve') {
     throw new Error('--static cannot be combined with another command');
+  }
+  if (opts.static && opts.allowApply) {
+    throw new Error('--allow-apply is unavailable with --static');
+  }
+  if (opts.allowApply && cmd !== 'serve') {
+    throw new Error('--allow-apply only applies to the browser server');
   }
   if (opts.input && cmd !== 'mutate' && cmd !== 'view') {
     throw new Error('--input can only be used with reorg mutate or reorg view');
@@ -994,6 +993,7 @@ async function main() {
     root,
     dataDir: serverDataDir,
     scanOptions: scanOpts(opts),
+    allowApply: !!opts.allowApply,
   });
   const port = await listenOnAvailablePort(
     server,
@@ -1008,14 +1008,19 @@ async function main() {
     }${initial.truncated ? ' (truncated -- raise --max-nodes)' : ''}`
   );
   console.log(`\n  ${url}\n`);
-  console.log('The browser can plan and dry-run only. To apply:');
-  const applyCommand = [
-    'reorg apply',
-    root === process.cwd() ? null : shellQuote(root),
-    '--yes',
-    opts.dataDir ? `--data-dir ${shellQuote(serverDataDir)}` : null,
-  ].filter(Boolean).join(' ');
-  console.log(`  ${applyCommand}\n`);
+  if (opts.allowApply) {
+    console.log('Browser apply is enabled for this session. Review and confirmation are still required.\n');
+  } else {
+    console.log('The browser can plan and dry-run only. To apply:');
+    const applyCommand = [
+      'reorg apply',
+      root === process.cwd() ? null : shellQuote(root),
+      '--yes',
+      opts.dataDir ? `--data-dir ${shellQuote(serverDataDir)}` : null,
+    ].filter(Boolean).join(' ');
+    console.log(`  ${applyCommand}`);
+    console.log('Or restart with --allow-apply to enable the Apply button.\n');
+  }
   console.log('Ctrl-C to stop.');
   if (opts.open !== false) openBrowser(url);
 

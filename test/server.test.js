@@ -303,7 +303,7 @@ test('/api/head caps how much it reads and says the result is truncated', async 
   }
 });
 
-test('the server can dry-run but never mutate the filesystem', async () => {
+test('the default server can dry-run but refuses filesystem mutations', async () => {
   const s = await serve(TREE);
   try {
     await mutate(s, [{ type: 'move', id: 'keep.txt', parentId: 'docs' }]);
@@ -315,9 +315,74 @@ test('the server can dry-run but never mutate the filesystem', async () => {
 
     const real = await s.call('/api/apply', { method: 'POST', body: { dryRun: false } });
     assert.equal(real.status, 403);
-    assert.match((await real.json()).error, /reorg apply --yes/);
+    assert.match((await real.json()).error, /--allow-apply/);
     assert.ok(existsSync(join(s.root, 'keep.txt')), 'a refused apply must not move anything');
     assert.ok(!existsSync(join(s.root, 'docs/keep.txt')));
+  } finally {
+    await s.close();
+  }
+});
+
+test('an apply-enabled server checks revisions, applies, and refreshes shared state', async () => {
+  const s = await serve(TREE, { allowApply: true });
+  try {
+    const mutation = await mutate(s, [{ type: 'move', id: 'keep.txt', parentId: 'docs' }]);
+    const view = await s.call('/api/view', {
+      method: 'PUT',
+      body: {
+        expectedRevision: 0,
+        patch: {
+          treeInitialized: true,
+          selectedId: 'keep.txt',
+          side: { mode: 'preview', targetId: 'keep.txt' },
+        },
+      },
+    });
+    assert.equal(view.status, 200);
+    const before = await (await s.call('/api/tree')).json();
+    assert.equal(before.allowApply, true);
+
+    const incomplete = await s.call('/api/apply', {
+      method: 'POST',
+      body: { dryRun: false },
+    });
+    assert.equal(incomplete.status, 400);
+    assert.equal((await incomplete.json()).code, 'invalid-command');
+    assert.ok(existsSync(join(s.root, 'keep.txt')));
+
+    const stale = await s.call('/api/apply', {
+      method: 'POST',
+      body: {
+        dryRun: false,
+        expectedRevision: mutation.plan.revision - 1,
+        expectedScanId: before.scan.id,
+      },
+    });
+    assert.equal(stale.status, 409);
+    assert.equal((await stale.json()).code, 'revision-conflict');
+    assert.ok(existsSync(join(s.root, 'keep.txt')));
+
+    const applied = await s.call('/api/apply', {
+      method: 'POST',
+      body: {
+        dryRun: false,
+        expectedRevision: mutation.plan.revision,
+        expectedScanId: before.scan.id,
+      },
+    });
+    assert.equal(applied.status, 200);
+    assert.equal((await applied.json()).applied, 1);
+    assert.ok(existsSync(join(s.root, 'docs/keep.txt')));
+    assert.ok(!existsSync(join(s.root, 'keep.txt')));
+
+    const after = await (await s.call('/api/inspect')).json();
+    assert.notEqual(after.scan.id, before.scan.id);
+    assert.equal(after.plan.revision, mutation.plan.revision + 1);
+    assert.deepEqual(after.plan.overrides, []);
+    assert.equal(after.view.selectedId, 'docs/keep.txt');
+    assert.deepEqual(after.view.side, { mode: 'preview', targetId: 'docs/keep.txt' });
+    assert.ok(after.scan.nodes.some((node) => node.id === 'docs/keep.txt'));
+    assert.equal(after.transactions.at(-1).actor, 'browser-apply');
   } finally {
     await s.close();
   }
@@ -401,7 +466,7 @@ test('a semantic transaction is persisted and handed back by /api/tree', async (
     assert.deepEqual(tree.plan.notes, [
       { id: 'note:test', target: 'keep.txt', body: 'why this stays' },
     ]);
-    assert.equal(Object.hasOwn(tree, 'allowApply'), false);
+    assert.equal(tree.allowApply, false);
   } finally {
     await s.close();
   }

@@ -24,13 +24,19 @@ import {
   WORKSPACE_BUSY_CODE,
   withWorkspaceLock,
 } from './state.js';
-import { resolve as resolvePlan, describeOp } from './plan.js';
+import { appliedIdMap, resolve as resolvePlan, describeOp } from './plan.js';
 import { apply } from './apply.js';
 import { summarize } from './summarize.js';
 import { looksTextual } from './text.js';
 import { analyze, ranked } from './signals.js';
-import { COMMAND_ERROR_CODE, CommandError, transactPlan } from './commands.js';
-import { materializeView, transactView } from './view.js';
+import {
+  COMMAND_ERROR_CODE,
+  CommandError,
+  RevisionConflictError,
+  retireAppliedPlanLocked,
+  transactPlan,
+} from './commands.js';
+import { materializeView, remapViewAfterApplyLocked, transactView } from './view.js';
 
 const WEB_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const INVALID_JSON_CODE = 'invalid-json';
@@ -125,6 +131,7 @@ export function createReorgServer({
   root,
   dataDir = null,
   scanOptions = {},
+  allowApply = false,
   token = randomBytes(24).toString('hex'),
 }) {
   // Keep one in-memory scan for normal requests and adopt a newer persisted scan
@@ -219,6 +226,7 @@ export function createReorgServer({
           workspace,
           ...snapshot,
           gitignore: current.gitignore,
+          allowApply,
           undoScripts: listUndoScripts(root),
         });
       }
@@ -351,22 +359,53 @@ export function createReorgServer({
       if (req.method === 'POST' && path === '/api/apply') {
         const body = await readBody(req);
         const dryRun = body.dryRun !== false;
-        if (!dryRun) {
+        if (!dryRun && !allowApply) {
           return sendJson(res, 403, {
-            error: 'Filesystem changes are only available through `reorg apply --yes` in the terminal.',
+            error:
+              'This server was started without --allow-apply. Restart with that flag, ' +
+              'or run `reorg apply --yes` in the terminal.',
           });
         }
         const { result, log } = readState(({ scan: frozen, plan }) => {
+          if (!dryRun) {
+            if (!Number.isInteger(body.expectedRevision) || body.expectedRevision < 0) {
+              throw new CommandError('expectedRevision must be a non-negative integer');
+            }
+            if (typeof body.expectedScanId !== 'string' || !body.expectedScanId) {
+              throw new CommandError('expectedScanId must be a non-empty string');
+            }
+            if (plan.revision !== body.expectedRevision) {
+              throw new RevisionConflictError(body.expectedRevision, plan.revision);
+            }
+            if (frozen.id !== body.expectedScanId) {
+              throw new CommandError('The frozen scan changed after this apply was prepared', {
+                code: COMMAND_ERROR_CODE.SCAN_CONFLICT,
+                details: { expected: body.expectedScanId, actual: frozen.id },
+              });
+            }
+          }
           const { ops, problems } = resolvePlan(frozen, plan);
           if (problems.length) return { result: { problems }, log: [] };
           const lines = [];
-          return {
-            result: apply(root, ops, { dryRun: true, onLog: (line) => lines.push(line) }),
-            log: lines,
-          };
+          const applied = apply(root, ops, { dryRun, onLog: (line) => lines.push(line) });
+          if (!dryRun && !applied.problems.length) {
+            const idMap = appliedIdMap(frozen, plan);
+            retireAppliedPlanLocked({
+              root,
+              dataDir,
+              expectedRevision: plan.revision,
+              actor: 'browser-apply',
+              idMap,
+            });
+            remapViewAfterApplyLocked({ root, dataDir, idMap, legacyUi: plan.ui });
+            current.scan = scan(root, frozen.options || {});
+            current.gitignore = readGitignore(root);
+            saveScan(root, current.scan, dataDir);
+          }
+          return { result: applied, log: lines };
         });
         if (result.problems.length) return sendJson(res, 409, { problems: result.problems });
-        return sendJson(res, result.problems.length ? 409 : 200, {
+        return sendJson(res, 200, {
           ...result,
           log,
         });
@@ -386,7 +425,10 @@ export function createReorgServer({
 
       return sendJson(res, 404, { error: 'no such endpoint' });
     } catch (e) {
-      const conflict = e instanceof CommandError && e.code === COMMAND_ERROR_CODE.REVISION_CONFLICT;
+      const conflict =
+        e instanceof CommandError &&
+        (e.code === COMMAND_ERROR_CODE.REVISION_CONFLICT ||
+          e.code === COMMAND_ERROR_CODE.SCAN_CONFLICT);
       const busy = e.code === WORKSPACE_BUSY_CODE;
       const status = busy ? 503 : conflict ? 409 : e instanceof CommandError ? 400 : 500;
       return sendJson(res, status, {

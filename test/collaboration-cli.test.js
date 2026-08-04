@@ -26,7 +26,7 @@ const TREE = {
   'keep.txt': 'keep',
 };
 
-test('schema exposes every semantic mutation and the CLI-only apply boundary', () => {
+test('schema exposes semantic agent mutations and the opt-in browser apply boundary', () => {
   const schema = runJson(['schema']);
   const types = schema.planTransaction.commands.map((entry) => entry.type);
   assert.ok(types.includes('move'));
@@ -34,8 +34,10 @@ test('schema exposes every semantic mutation and the CLI-only apply boundary', (
   assert.ok(types.includes('set-note'));
   assert.ok(types.includes('reset-plan'));
   assert.match(schema.inspect.rescanCommand, /reorg rescan/);
+  assert.equal(schema.safety.directStateFileMutationSupported, false);
   assert.equal(schema.safety.stateCommandsModifySourceFilesystem, false);
-  assert.equal(schema.safety.browserCanModifySourceFilesystem, false);
+  assert.equal(schema.safety.browserApplyEnabledByDefault, false);
+  assert.equal(schema.safety.browserApplyEnableFlag, '--allow-apply');
   assert.match(schema.safety.filesystemApplyCommand, /reorg apply.*--yes/);
 });
 

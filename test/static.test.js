@@ -42,6 +42,22 @@ test('--help includes the package version in its header', () => {
     result.stdout.split(/\r?\n/, 1)[0],
     `reorg ${PACKAGE_VERSION} -- plan a directory reorganization, then apply it safely.`
   );
+  assert.match(result.stdout, /--allow-apply/);
+});
+
+test('--allow-apply is limited to the live browser server', () => {
+  const root = sandbox({ 'keep.txt': 'keep' });
+  try {
+    const staticResult = runCli([root, '--static', '--allow-apply', '--no-open']);
+    assert.equal(staticResult.status, 1);
+    assert.match(staticResult.stderr, /unavailable with --static/i);
+
+    const inspectResult = runCli(['inspect', root, '--allow-apply']);
+    assert.equal(inspectResult.status, 1);
+    assert.match(inspectResult.stderr, /only applies to the browser server/i);
+  } finally {
+    cleanup(root);
+  }
 });
 
 test('the static planner inlines its assets and scan data', () => {

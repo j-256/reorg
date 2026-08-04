@@ -11,6 +11,7 @@ import {
   editNote,
   deleteNote,
   addNote,
+  runApply,
   runSafetyCheck,
   fmtBytes,
   toggleEvict,
@@ -374,19 +375,49 @@ function renderReview(body) {
   });
   row.appendChild(dry);
 
-  const unavailable = el('button', 'btn', 'apply to disk unavailable');
-  unavailable.disabled = true;
-  unavailable.setAttribute('aria-describedby', 'applyLimit');
-  row.appendChild(unavailable);
+  if (store.allowApply) {
+    const go = el('button', 'btn danger', `apply ${ops.length} operation(s) to disk`);
+    go.title = 'Move files on disk after writing an undo script';
+    go.addEventListener('click', async () => {
+      const trashCount = d.stats && d.stats.trash;
+      const message = [
+        `Apply ${ops.length} operation(s) to ${store.scan.root}?`,
+        '',
+        trashCount
+          ? `${trashCount} item(s) move to .reorg/trash/ -- nothing is deleted.`
+          : 'Nothing will be deleted.',
+        'An undo script is written before any change.',
+      ].join('\n');
+      if (!window.confirm(message)) return;
+      go.disabled = true;
+      go.textContent = 'applying\u2026';
+      go.setAttribute('aria-busy', 'true');
+      await runApply();
+      if (go.isConnected) {
+        go.disabled = false;
+        go.textContent = `apply ${ops.length} operation(s) to disk`;
+        go.removeAttribute('aria-busy');
+      }
+    });
+    row.appendChild(go);
+  } else {
+    const unavailable = el('button', 'btn', 'apply to disk unavailable');
+    unavailable.disabled = true;
+    unavailable.setAttribute('aria-describedby', 'applyLimit');
+    row.appendChild(unavailable);
+  }
   actions.appendChild(row);
 
-  const limit = el(
-    'p',
-    'note-empty',
-    'Filesystem changes are CLI-only. Apply the saved plan with  reorg apply --yes  in the terminal.'
-  );
-  limit.id = 'applyLimit';
-  actions.appendChild(limit);
+  if (!store.allowApply) {
+    const limit = el(
+      'p',
+      'note-empty',
+      'This browser session is planning-only. Apply the saved plan with  reorg apply --yes  in the terminal, ' +
+        'or restart with  reorg --allow-apply.'
+    );
+    limit.id = 'applyLimit';
+    actions.appendChild(limit);
+  }
   if (store.undoScripts && store.undoScripts.length) {
     actions.appendChild(
       el('p', 'note-empty', `Previous runs you can still undo: ${store.undoScripts.join(', ')}`)
