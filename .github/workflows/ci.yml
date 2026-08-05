@@ -147,7 +147,7 @@ jobs:
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Verify the packed CLI runs from a clean install
+      - name: Verify the packed CLI and Skill from a clean install
         run: |
           set -euo pipefail
           tgz="$(ls "$PWD"/artifacts/*.tgz)"
@@ -158,6 +158,7 @@ jobs:
           # The package name and the installed command differ on purpose, so
           # assert on the binary rather than assuming they match.
           ./node_modules/.bin/reorg --help | head -1
+          test -f ./node_modules/reorg-cli/.agents/skills/reorg/SKILL.md
           mkdir -p sample/old-backup && echo hi > sample/keep.txt
           ./node_modules/.bin/reorg triage sample
           # Dry run must be the default: this must not move anything.

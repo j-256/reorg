@@ -4,10 +4,10 @@ name: Publish npm package
 #   - push a v* tag      -> validate, package, and publish
 #   - workflow_dispatch  -> validate and package, dry run by default
 #
-# Releases are cut with `npm version patch` on main, which tags and pushes; that
-# tag push is what lands here. Post-release verification and GitHub release
-# metadata live in post-release.yml so they cannot turn a successful npm publish
-# red after the irreversible write
+# Releases are cut with `npm version <major|minor|patch>` on main, which tags and
+# pushes; that tag push is what lands here. Post-release verification and GitHub
+# release metadata live in post-release.yml so they cannot turn a successful npm
+# publish red after the irreversible write
 #
 # The filename is load-bearing: npm pins the trusted publisher to one exact
 # workflow filename, so renaming this file breaks authentication
@@ -136,7 +136,7 @@ jobs:
       # package job -- duplicated on purpose, since Actions has no include for
       # step bodies and workflow_call is what npm flags as breaking OIDC
       # trusted-publisher validation
-      - name: Verify the packed CLI runs from a clean install
+      - name: Verify the packed CLI and Skill from a clean install
         run: |
           set -euo pipefail
           set -- "$PWD"/artifacts/*.tgz
@@ -152,6 +152,7 @@ jobs:
           # The package name and the installed command differ on purpose, so
           # assert on the binary rather than assuming they match
           ./node_modules/.bin/reorg --help | head -1
+          test -f ./node_modules/reorg-cli/.agents/skills/reorg/SKILL.md
           mkdir -p sample/old-backup && echo hi > sample/keep.txt
           ./node_modules/.bin/reorg triage sample
           # Dry run must be the default: this must not move anything

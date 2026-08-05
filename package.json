@@ -29,6 +29,7 @@
     "node": ">=22"
   },
   "files": [
+    ".agents/skills/reorg/SKILL.md",
     "bin",
     "src",
     "web",
