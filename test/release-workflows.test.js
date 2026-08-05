@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
+const NPM_CONFIG = readFileSync(new URL('../.npmrc', import.meta.url), 'utf8');
 const PUBLISH_WORKFLOW = readFileSync(
   new URL('../.github/workflows/release.yml', import.meta.url),
   'utf8',
@@ -10,6 +11,11 @@ const POST_RELEASE_WORKFLOW = readFileSync(
   new URL('../.github/workflows/post-release.yml', import.meta.url),
   'utf8',
 );
+
+test('project npm config gives every version commit the conventional format', () => {
+  assert.equal(NPM_CONFIG.trim(), 'message=chore(release): %s');
+  assert.match(PUBLISH_WORKFLOW, /npm version <major\|minor\|patch>/);
+});
 
 test('publishing waits for every release gate and uses the verified tarball', () => {
   const preserveIndex = PUBLISH_WORKFLOW.indexOf('name: Preserve the verified package');

@@ -4,10 +4,11 @@ name: Publish npm package
 #   - push a v* tag      -> validate, package, and publish
 #   - workflow_dispatch  -> validate and package, dry run by default
 #
-# Releases are cut with `npm version <major|minor|patch>` on main, which tags and
-# pushes; that tag push is what lands here. Post-release verification and GitHub
-# release metadata live in post-release.yml so they cannot turn a successful npm
-# publish red after the irreversible write
+# Releases are cut with `npm version <major|minor|patch>` on main, which creates
+# the version commit and tag, then pushes both atomically. That tag push is what
+# lands here. Post-release verification and GitHub release metadata live in
+# post-release.yml so they cannot turn a successful npm publish red after the
+# irreversible write
 #
 # The filename is load-bearing: npm pins the trusted publisher to one exact
 # workflow filename, so renaming this file breaks authentication
