@@ -18,6 +18,8 @@ When a destination does not exist yet, create and select it without leaving Move
 
 No runtime dependencies, no build step, no config file. One Node script and a page.
 
+The architecture and the tradeoffs behind those constraints are documented in [DESIGN.md](DESIGN.md).
+
 ## Why
 
 Cleaning up a directory has two distinct parts: deciding what its shape should be, and safely realizing that plan on disk. An AI agent can accelerate the first part only when you and the agent can see the same state, build on each other's decisions, and catch stale or conflicting intent. Reorg provides that shared, revisioned planning surface, then compiles the agreed plan into ordered filesystem operations for applying and undoing the changes, with collisions caught before anything moves.
@@ -60,13 +62,13 @@ npm run test:ui # browser tests; needs `npm ci` and a Chromium
 npm run test:all
 ```
 
-`npm test` needs nothing installed, deliberately: it covers the scanner, the plan resolver, the apply engine and its undo scripts, the triage signals, the server's access control, and the browser-side plan model, all under `node --test` with nothing fetched.
-
-`npm run test:ui` drives the real page in a real Chromium, which is the only way to cover what a fake DOM cannot: drop-zone geometry is computed from the pointer's position against a row's box, and jsdom reports every box as zero-sized. Automated accessibility coverage combines axe-core rules with a dedicated text-contrast sweep at WCAG AAA enhanced thresholds across both themes, every side panel, and every dialog. Playwright and axe-core are confined to `devDependencies`:
+`npm test` uses Node's built-in test runner and needs nothing installed. Browser and accessibility tests use Playwright and axe-core from `devDependencies`:
 
 ```bash
 npm ci && npx playwright install chromium
 ```
+
+See [DESIGN.md](DESIGN.md#testing-strategy) for the boundaries between pure resolver tests, filesystem integration tests, and browser tests.
 
 ## Using it
 
@@ -125,18 +127,22 @@ The source checkout includes one canonical [Reorg Agent Skill](.agents/skills/re
 
 The Skill is instruction-only. It selects the first compatible CLI by checking `reorg schema --json`: the source-checkout command, an installed `reorg`, then `npx --yes reorg-cli@latest`. The `npx` fallback may populate npm's cache but does not install a global command. Every deterministic state transition remains in Reorg's revisioned CLI.
 
+The collaboration model, concurrency contract, and decision not to add an MCP adapter are documented in [DESIGN.md](DESIGN.md#agent-integration).
+
 To install the Skill globally without cloning the repository, download its single canonical file into the personal Skill directory for your agent:
 
+For Codex:
+
 ```bash
-REORG_SKILL_URL="https://raw.githubusercontent.com/j-256/reorg/main/.agents/skills/reorg/SKILL.md"
-
-# Codex
 mkdir -p "$HOME/.agents/skills/reorg"
-curl -fsSL "$REORG_SKILL_URL" -o "$HOME/.agents/skills/reorg/SKILL.md"
+curl -fsSL "https://raw.githubusercontent.com/j-256/reorg/main/.agents/skills/reorg/SKILL.md" -o "$HOME/.agents/skills/reorg/SKILL.md"
+```
 
-# Claude Code
+For Claude Code:
+
+```bash
 mkdir -p "$HOME/.claude/skills/reorg"
-curl -fsSL "$REORG_SKILL_URL" -o "$HOME/.claude/skills/reorg/SKILL.md"
+curl -fsSL "https://raw.githubusercontent.com/j-256/reorg/main/.agents/skills/reorg/SKILL.md" -o "$HOME/.claude/skills/reorg/SKILL.md"
 ```
 
 Claude Code users can instead install the Skill as a user-scoped plugin, which gives it the namespaced `/reorg:reorg` command and marketplace updates:
@@ -148,46 +154,7 @@ claude plugin install reorg@reorg --scope user
 
 Use either the direct Claude Code installation or the plugin installation so Claude does not load the same workflow twice. Installing `reorg-cli` globally remains useful for the bare `reorg` command and avoids the `npx` startup path, but the Skill does not require it.
 
-The workspace contains related state with different jobs:
-
-| File | Role |
-|---|---|
-| `workspace.json` | stable workspace id and source-root binding |
-| `scan.json` | the frozen directory scan all collaborators organize |
-| `plan.json` | the revisioned semantic diff, notes, summaries, and idempotency records |
-| `view.json` | the independently revisioned filters, collapsed folders, selection, theme, and side panel |
-| `transactions.jsonl` | append-only attribution and command history for plan changes |
-
-`reorg inspect --json` answers both "what is planned?" and "what is Reorg displaying?". Its projection explains whether each node is visible, filtered, hidden under a collapsed ancestor, dimmed by a change filter, muted as git-ignored, selected, or shown with size tinting. It also returns recent attributed plan transactions and the exact ordered operations the canonical plan resolves to.
-
-`reorg inspect` deliberately reads the frozen scan rather than silently replacing it with the live filesystem. Starting the browser also reuses an existing frozen scan unless explicit scan options request a new one. Use `reorg rescan --json` when a collaborator intentionally wants to refresh that shared baseline; a running browser adopts the new scan through the same workspace.
-
-An agent can discover the accepted command shapes instead of relying on prompt prose:
-
-```bash
-reorg schema
-reorg inspect ~/Downloads --json
-```
-
-Then it can submit one atomic, idempotent transaction. Supplying the revision returned by `inspect` makes stale intent fail instead of overwriting another collaborator:
-
-```bash
-reorg mutate ~/Downloads --input - --json <<'JSON'
-{
-  "expectedRevision": 4,
-  "transactionId": "organize-writing-1",
-  "actor": "my-agent",
-  "commands": [
-    { "type": "create-folder", "id": "new:writing", "parentId": ".", "name": "Writing" },
-    { "type": "move", "id": "draft.md", "parentId": "new:writing" }
-  ]
-}
-JSON
-```
-
-The transaction changes planning state only. Reusing its id with the same commands is safe; reusing it for different commands is rejected. A plan may temporarily contain a collision while a later command fixes it, but `reorg apply` refuses unresolved problems. Use `reorg view --focus draft.md` when the agent should reveal the same entry in the browser without changing the plan.
-
-With `--json`, command failures are emitted as one JSON object on stderr. `revision-conflict` means the agent should inspect again before reconsidering its intent; `workspace-busy` is retryable with the same transaction id; `idempotency-conflict` means that id was reused for different commands.
+### Workspace portability
 
 By default the workspace lives in `<root>/.reorg`. Put it elsewhere when the planning data should travel independently:
 
@@ -241,6 +208,7 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 ![Review panel listing the resolved operations in order, with a run safety check button](docs/review.png)
 
 - **Dry run is the default.** `reorg apply` prints and exits. The browser starts without apply capability; `reorg --allow-apply` enables a confirmation-protected Apply button for that server session. The terminal requires the separate `reorg apply --yes` command.
+- **The live server is local and token-gated.** It binds to loopback, requires the per-run token carried in the browser URL, and confines file access to the scan root.
 - **Nothing is deleted.** "Trash" moves into `.reorg/trash/<run>/`. Emptying that is a separate decision you make yourself.
 - **Drift aborts the whole batch.** Every source path is checked to still exist and every destination to be free *before* the first move. If the tree changed since the scan, nothing is applied – not "nothing further", nothing at all.
 - **An undo script is written before execution starts**, so even a crash mid-run leaves a way back. It is guarded per step, so running it after a partial apply undoes only what happened.
@@ -248,7 +216,7 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 - **`git mv` for tracked files**, so history follows the move. (Git refuses this on a fully-untracked directory; Reorg falls back to a plain rename there.)
 - **Rename cycles work.** Swapping two names is impossible with direct renames in any order, so Reorg routes cycle members through a staging directory instead of failing.
 
-The semantic plan remains a diff against the frozen scan rather than a second copy of the tree. The default `.reorg/` workspace git-ignores itself on creation, so planning a repo's layout never dirties that repo.
+The default `.reorg/` workspace git-ignores itself on creation, so planning a repo's layout never dirties that repo. See [DESIGN.md](DESIGN.md#plan-representation-and-resolution) for how the semantic plan becomes ordered, recoverable operations.
 
 ## File summaries
 
@@ -257,16 +225,16 @@ Half of triage is remembering what a file *is*. `reorg summarize` labels each on
 Two ways to get them, and the default needs no API key:
 
 ```bash
-# Agent path: writes a prompt pack, your coding agent fills it in. Free.
+# Agent path: writes a prompt pack for your coding agent to fill in
 reorg summarize ~/Downloads          # -> <data-dir>/summarize.md + summaries.json
-#   ...point Claude Code (or any agent) at that markdown file...
+# Point Claude Code or another agent at that markdown file
 reorg summarize --ingest ~/Downloads
 
-# API path: calls the Messages API directly. Needs a key.
-ANTHROPIC_API_KEY=sk-... reorg summarize ~/Downloads
+# API path: calls the Messages API directly and needs a key
+ANTHROPIC_API_KEY="<your-api-key>" reorg summarize ~/Downloads
 ```
 
-The API path batches files (about a dozen per request), sends only the first few KB of each, skips binaries and empty files, and defaults to Haiku because this is a classification job. Override with `--model`. It uses `fetch` against the documented HTTP API – no SDK dependency.
+The API path batches files, sends only a bounded text sample from each, skips binaries and empty files, and defaults to Haiku because this is a classification job. Override with `--model`.
 
 Summaries are stored in the plan and keyed by stable node id, so they survive a rescan. After an apply renames or moves an entry, reorg remaps its summary and notes to the resulting path before refreshing the frozen scan.
 
@@ -287,127 +255,11 @@ Summaries are stored in the plan and keyed by stable node id, so they survive a 
 | a bare `.git` clone | a mirror kept as a one-off safety copy |
 | bulky | worth a decision purely for what it costs to keep |
 
-Position matters, because the same word can name a subject rather than a status. Only trailing markers count, and the screenshot above shows both sides of that: `project-backup-20260415` is flagged, while `backup-strategy-notes.md` and `all-mail-including-spam-and-trash.mbox` sit in the same tree untouched – one is a document *about* backups, the other is 2.9 GB of actual mail. Both of those were real false positives before the position rule went in, and flagging 3 GB of someone's mail as trash is how a suggestion list loses its reader.
+Position matters because the same word can name a subject rather than a status, so only trailing markers count. Emptiness is deliberately not a signal because empty directories are often intentional placeholders or mount points and cost little to retain. Age remains visible as context but never determines the ranking. The evidence and tradeoffs behind those choices are documented in [DESIGN.md](DESIGN.md#triage-signals).
 
-Emptiness is deliberately not a signal: empty directories are often intentional (mount points, placeholders) and cost nothing to keep.
+## Development
 
-### Why age is not a signal
-
-Look at the ages the triage panel prints above: every flagged candidate is *recent* – 3, 12, 34 days. Nothing there is old, because in a directory that got away from you the junk is usually the newest thing in it. Sorting by mtime would push all six candidates to the bottom.
-
-That inversion is why the ranking works the way it does, and it is not invented for the screenshot. Measured against a real long-neglected scratch directory:
-
-- The clearly-disposable entries – a `-backup-20260425` directory, a `.zip` still sitting beside its unpacked copy, a downloaded `.dmg` – had ages spanning 12 to 586 days, so age separated them from nothing. Seven of eight `-backup-`/`-dryrun-` directories were all *12 days old*: an age sort would have called them active work.
-- What age surfaced at the top instead were keepers – an example image kept on purpose for two years, a reference screenshot, a script still in use.
-
-Age is still shown on every row, for context. It is just never what sorts them.
-
-## How the plan becomes operations
-
-Worth knowing, because it explains why the output looks the way it does.
-
-Every entry has a stable id (its path at scan time) and two positions: the frozen original and the live one you edit. The diff between them is the plan. Resolving it produces operations in dependency order:
-
-1. **`mkdir`** for folders you invented, shallowest first.
-2. **`mv`**, but only for entries whose *own* position changed. Moving `a/` to `b/a/` relocates everything inside it implicitly – emitting a second move for `a/x` would fail, because by then its source is gone. Destinations are final-tree paths, so each entry moves once.
-3. **`trash`** last, at each entry's post-move location.
-
-Move ordering is a topological sort over two constraints: vacate before occupy (if X lands where Y still is, Y goes first), and parent before child (if X lands inside where Y is going, Y arrives first). A cycle between them means no order works, which is when staging kicks in.
-
-`reorg plan` prints exactly this list, and the planner's **review plan** panel shows the same thing before you apply.
-
-## Layout
-
-```
-bin/reorg          CLI: scan, serve or build static, plan, apply, undo, summarize, status
-src/scan.js        walk a directory, tag git status, summarize collapsed dirs
-src/plan.js        pure resolver: plan -> ordered operations (no fs, no exec)
-src/commands.js    revisioned semantic plan transactions and idempotency
-src/view.js        effective presentation projection and shared view transactions
-src/schema.js      machine-readable collaboration contract
-src/apply.js       execute, with drift checks, git mv, trash, undo script
-src/summarize.js   Messages API batching + the no-key agent prompt pack
-src/signals.js     cleanup signals: what looks disposable, and why (name, not age)
-src/server.js      stdlib http server, token-gated JSON API
-src/static.js      build a self-contained planner with an embedded read-only API
-src/state.js       portable workspace persistence, locks, leases, and recovery paths
-web/               the planner: tree, drag and drop, preview, review
-test/              unit tests for the resolver, integration tests on real temp dirs
-```
-
-`src/plan.js` is deliberately pure so the risky decisions are testable without a filesystem. The integration tests do the opposite – real directories, real git repos, real `bash undo-*.sh` round trips – because a resolver that is right on paper and wrong on disk is worthless.
-
-```bash
-npm test
-```
-
-## The server
-
-<!-- Keep the traversal example off `../../etc/`. npm sends this README to the
-     registry as plaintext, and the WAF in front of registry.npmjs.org rejects
-     that path as an attack signature -- npm then reports the block as a generic
-     E403 that names no cause. See ## Releasing. -->
-
-`reorg` serves on loopback with a per-run token in the URL. That is not theatre: the API can read file contents and mutate the shared plan and view. It can move source files only when the server was explicitly started with `--allow-apply`, after Review and an in-browser confirmation. A token means another process on the machine, or a stray browser tab, cannot drive it. Path parameters are confined to the scan root, so `../../.ssh/id_rsa` is rejected rather than served.
-
-## Releasing
-
-```bash
-npm version patch   # or minor, major
-```
-
-That runs a guard (on `main`, in sync with `origin/main`), runs the dependency-free suite, bumps the version, commits, tags, and pushes. The tag push starts the `Publish npm package` workflow. Its browser and package jobs validate the tagged tree, pack it once, install and exercise that exact tarball, and preserve it as a workflow artifact. The publish job starts only after both gates pass, downloads the same verified tarball, and publishes it to npm with a provenance attestation as its final meaningful action.
-
-A successful tag-triggered publish starts the separately named `Post-release verification` workflow. That workflow installs the exact version from the registry and creates or updates the GitHub release with the preserved tarball. A failure there reports post-release verification or metadata trouble without relabeling a successful npm publish as a failed deployment.
-
-To exercise the pipeline without publishing, dispatch it manually – `dry_run` defaults to true:
-
-```bash
-gh workflow run release.yml
-```
-
-A dry run proves that the package builds, packs, installs, passes its tests, and is preserved as the release artifact. It skips the artifact download and registry-facing publish job. Credentials, provenance, registry acceptance, and the download side of the artifact handoff are only exercised by a real release.
-
-Manual dispatches from a branch cannot publish even when `dry_run` is unchecked: the publish job also requires a `v*` tag. Release by pushing a tag.
-
-The post-release workflow can also be exercised without changing a GitHub release. Give it the successful publish-workflow run that contains the preserved artifact and an existing published tag; `create_release` defaults to false:
-
-```bash
-release_tag="v$(node -p 'require("./package.json").version')"
-publish_run="$(gh run list --workflow release.yml --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')"
-gh workflow run post-release.yml -f source_run_id="$publish_run" -f tag="$release_tag"
-```
-
-If the publish workflow fails before npm accepts the upload – a bad tag, a failed test, or an authentication error – that registry version remains available and you can move the tag onto the fix:
-
-```bash
-npm run retag
-```
-
-That moves the tag to whatever `main` currently points at, so push the fix first. `retag` runs the same guard as `npm version` and refuses from a feature branch or an unpushed `main`, since either would tag a commit the release then could not verify.
-
-`retag` only works when the tag actually moves. If the tag already points at the commit you want – a run that failed for a reason outside the repo, say a registry outage – the force-push is a no-op, git prints `Everything up-to-date`, and **no workflow runs**: Actions fires on a ref change, and nothing changed. Re-run the same commit by dispatching against the tag instead:
-
-```bash
-gh workflow run release.yml --ref "v$(node -p 'require("./package.json").version')" -f dry_run=false
-```
-
-The `dry_run=false` is required – dispatch defaults to a dry run, which publishes nothing. Unlike a dispatch from a branch, this one has a tag, so both tag checks run and publication is allowed. A manually dispatched recovery does not start post-release automation; after publication succeeds, dispatch `post-release.yml` with the publish run id, the tag, and `create_release=true`.
-
-Once a version is on the registry it is spent; npm does not allow republishing it. Before retrying any red publish run, check the registry because a lost response can leave npm with the package even when the runner did not observe success. If the version exists, do not retag or republish it: run post-release verification and use the next patch for any package change.
-
-A publish sends this README to the registry as plaintext, on every release rather than only the first, and a WAF sits in front of `registry.npmjs.org` that rejects request bodies matching attack signatures. So prose here can fail a release: a path-traversal example was once enough. npm reports the block as `E403` with boilerplate about "your security policy", naming neither the WAF nor the cause, so it reads like a credential problem. To tell them apart, PUT the same document with *no* credentials – the WAF answers before npm authenticates, so an HTML 403 indicts the payload while JSON clears it, and an unauthenticated request cannot publish.
-
-Publishing carries no credential at all. npm knows this repository, `release.yml`, and the `prd` environment as a trusted publisher, so it exchanges the workflow's OIDC token for a short-lived publish token – nothing long-lived to leak, rotate, or forget. A fork cannot publish, because the claim names this repository.
-
-Those three values have to agree with the package's settings on npmjs.com exactly, and all three are easy to break by accident: renaming this workflow file, or renaming the job's `environment:`, or dropping it. GitHub only puts an `environment` claim in the token when the job declares one, so `environment: prd` in `release.yml` is load-bearing for authentication rather than deployment bookkeeping. npm does not validate a trusted publisher when you save it, and a mismatch fails silently at publish time: the exchange is skipped, `npm publish` runs unauthenticated, and the registry answers `E404 ... you do not have permission`, which reads like a missing package. Ask the exchange endpoint directly for the real message:
-
-```bash
-curl -X POST -H "Authorization: Bearer $ID_TOKEN" \
-  https://registry.npmjs.org/-/npm/v1/oidc/token/exchange/package/reorg-cli
-```
-
-Trusted publishing cannot perform a package's *first* publish, though – npmjs.com only exposes the setting for a package that already exists – so `0.1.0` went out with a short-lived granular token, which was then revoked. Anyone bootstrapping a *new* package from this workflow has to do the same: publish once with an `NPM_TOKEN` secret and `NODE_AUTH_TOKEN` set on the publish step, then register the publisher and remove both.
+See [DESIGN.md](DESIGN.md) for the architecture, invariants, source layout, and testing strategy. See [RELEASING.md](RELEASING.md) for the verified-package workflow, trusted publishing configuration, and release recovery procedures.
 
 ## License
 

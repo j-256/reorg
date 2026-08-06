@@ -34,6 +34,8 @@
     "src",
     "web",
     "README.md",
+    "DESIGN.md",
+    "RELEASING.md",
     "LICENSE"
   ],
   "scripts": {
