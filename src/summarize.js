@@ -34,6 +34,19 @@ const HEAD_CHARS = 4000; // per file: enough to characterize, small enough to ba
 const BATCH_FILES = 12;
 const PROMPT_FILE = 'summarize.md';
 const OUT_FILE = 'summaries.json';
+
+function ownValue(record, key) {
+  return Object.prototype.hasOwnProperty.call(record, key) ? Reflect.get(record, key) : undefined;
+}
+
+function setOwn(record, key, value) {
+  Object.defineProperty(record, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+}
 const SUMMARY_MERGE_RETRIES = 3;
 
 const SYSTEM = [
@@ -243,8 +256,8 @@ export async function summarize({
       continue;
     }
     for (const e of batch) {
-      const v = parsed[e.path];
-      if (typeof v === 'string' && v.trim()) summaries[e.path] = v.trim().slice(0, 200);
+      const v = ownValue(parsed, e.path);
+      if (typeof v === 'string' && v.trim()) setOwn(summaries, e.path, v.trim().slice(0, 200));
       else skipped.push({ path: e.path, why: 'not in model reply' });
     }
   }
@@ -328,8 +341,8 @@ export function ingestSummaries(root, dataDir = null) {
   for (const [k, v] of Object.entries(raw)) {
     if (typeof v === 'string' && v.trim()) {
       const summary = v.trim().slice(0, 200);
-      if (plan.summaries[k] !== summary) added++;
-      additions[k] = summary;
+      if (ownValue(plan.summaries, k) !== summary) added++;
+      setOwn(additions, k, summary);
     }
   }
   const result = mergeSummaries({

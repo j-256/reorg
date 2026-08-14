@@ -40,6 +40,25 @@ const INTERNAL_COMMAND = Object.freeze({
   RETIRE_APPLIED_PLAN: 'retire-applied-plan',
 });
 
+function ownValue(record, key) {
+  return Object.prototype.hasOwnProperty.call(record, key) ? Reflect.get(record, key) : undefined;
+}
+
+function setOwn(record, key, value) {
+  Object.defineProperty(record, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  });
+}
+
+function withOwnValue(record, key, value) {
+  const copy = { ...record };
+  setOwn(copy, key, value);
+  return copy;
+}
+
 export class CommandError extends Error {
   constructor(message, { code = COMMAND_ERROR_CODE.INVALID, details = null } = {}) {
     super(message);
@@ -151,7 +170,7 @@ function transactionDigest(commands) {
 }
 
 function checkDuplicateTransaction(root, dataDir, current, transactionId, digest) {
-  const recentDigest = current.recentTransactionDigests?.[transactionId];
+  const recentDigest = ownValue(current.recentTransactionDigests || {}, transactionId);
   const logged = recentDigest ? null : findTransaction(root, transactionId, dataDir);
   if (!current.recentTransactions.includes(transactionId) && !logged) return false;
   const previousDigest = recentDigest || (logged?.commands ? transactionDigest(logged.commands) : null);
@@ -340,7 +359,7 @@ export function applyCommands(scanResult, sourcePlan, commands) {
         if (!id || typeof summary !== 'string' || !summary.trim()) {
           throw new CommandError('Summary ids and values must be non-empty strings');
         }
-        state.summaries[id] = summary.trim();
+        setOwn(state.summaries, id, summary.trim());
       }
       results.push({ type: command.type, changed: true });
       continue;
@@ -402,10 +421,11 @@ export function transactPlan({
         {
           ...current,
           recentTransactions: [...current.recentTransactions, transactionId],
-          recentTransactionDigests: {
-            ...current.recentTransactionDigests,
-            [transactionId]: digest,
-          },
+          recentTransactionDigests: withOwnValue(
+            current.recentTransactionDigests,
+            transactionId,
+            digest
+          ),
         },
         dataDir
       );
@@ -436,10 +456,11 @@ export function transactPlan({
       ...result.plan,
       revision: current.revision + 1,
       recentTransactions: [...current.recentTransactions, transactionId],
-      recentTransactionDigests: {
-        ...current.recentTransactionDigests,
-        [transactionId]: digest,
-      },
+      recentTransactionDigests: withOwnValue(
+        current.recentTransactionDigests,
+        transactionId,
+        digest
+      ),
     };
     const saved = savePlan(root, next, dataDir);
     logTransaction(
@@ -492,7 +513,7 @@ export function retireAppliedPlanLocked({
   const remapId = (id) => idMap.get(id) || id;
   const summaries = {};
   for (const [id, summary] of Object.entries(current.summaries || {})) {
-    summaries[remapId(id)] = summary;
+    setOwn(summaries, remapId(id), summary);
   }
   const next = savePlan(
     root,
@@ -505,10 +526,11 @@ export function retireAppliedPlanLocked({
       summaries,
       revision: current.revision + 1,
       recentTransactions: [...current.recentTransactions, transactionId],
-      recentTransactionDigests: {
-        ...current.recentTransactionDigests,
-        [transactionId]: digest,
-      },
+      recentTransactionDigests: withOwnValue(
+        current.recentTransactionDigests,
+        transactionId,
+        digest
+      ),
     },
     dataDir
   );

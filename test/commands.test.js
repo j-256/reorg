@@ -198,6 +198,21 @@ test('a malformed transaction is rejected atomically', () => {
   }
 });
 
+test('summary ids cannot modify the summary record prototype', () => {
+  const w = workspace();
+  try {
+    const summaries = JSON.parse('{"__proto__":"safe summary"}');
+    const result = applyCommands(w.scan, loadPlan(w.root, w.dataDir), [
+      { type: COMMAND.MERGE_SUMMARIES, summaries },
+    ]);
+    assert.equal(Object.getPrototypeOf(result.plan.summaries), Object.prototype);
+    assert.equal(Object.hasOwn(result.plan.summaries, '__proto__'), true);
+    assert.equal(result.plan.summaries.__proto__, 'safe summary');
+  } finally {
+    w.cleanup();
+  }
+});
+
 test('a transaction may persist resolver problems for a later command to fix', () => {
   const w = workspace();
   try {
