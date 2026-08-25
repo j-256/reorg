@@ -39,7 +39,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "test": "node --test --test-reporter=spec \"test/*.test.js\"",
+    "check:docs-cover": "node scripts/check-docs-cover.mjs",
+    "test": "npm run check:docs-cover && node --test --test-reporter=spec \"test/*.test.js\"",
     "test:ui": "node --test --test-reporter=spec \"test/*.spec.js\"",
     "test:all": "npm test && npm run test:ui",
     "screenshots": "node scripts/screenshots.mjs",

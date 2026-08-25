@@ -10,7 +10,7 @@ That scans the directory, opens the planner in your browser, and prints a URL. Y
 
 > Help me organize `~/Downloads` with Reorg. Start by showing me what you would change, then keep the browser in sync as we work through it together.
 
-![The planner mid-edit: a new folder, two moves, two entries marked for trash](docs/planner.png)
+![The planner mid-edit: a new folder, two moves, two entries marked for trash](docs/screenshots/cover.png)
 
 When a destination does not exist yet, create and select it without leaving Move. Repeat that step to build as much nested structure as the plan needs.
 

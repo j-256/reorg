@@ -11,13 +11,15 @@
 // Default outDir is docs/.
 
 import { chromium } from 'playwright';
-import { mkdirSync, mkdtempSync, rmSync, openSync, writeSync, closeSync, utimesSync } from 'node:fs';
+import { closeSync, copyFileSync, mkdirSync, mkdtempSync, openSync, rmSync, utimesSync, writeSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createReorgServer } from '../src/server.js';
 
 const OUT = process.argv[2] || join(dirname(fileURLToPath(import.meta.url)), '..', 'docs');
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+const COVER = join(ROOT, 'docs', 'screenshots', 'cover.png');
 // Height is tuned so the tree content fills the frame: the demo tree runs to about
 // 560px, and a taller viewport just adds dead space below the last row that a
 // reader has to scroll past in the README.
@@ -202,6 +204,11 @@ async function main() {
     });
     await page.waitForTimeout(900);
     await shot(page, 'review.png');
+    if (process.argv[2] === undefined) {
+      mkdirSync(dirname(COVER), { recursive: true });
+      copyFileSync(join(OUT, 'planner.png'), COVER);
+      console.log('  wrote screenshots/cover.png');
+    }
     console.log('done');
   } finally {
     if (browser) await browser.close();
