@@ -29,6 +29,10 @@ const TREE = {
 test('schema exposes semantic agent mutations and the opt-in browser apply boundary', () => {
   const schema = runJson(['schema']);
   const types = schema.planTransaction.commands.map((entry) => entry.type);
+  assert.equal(schema.version, 2);
+  assert.equal(schema.jsonSchemaDialect, 'https://json-schema.org/draft/2020-12/schema');
+  assert.equal(schema.planTransaction.inputSchema.$schema, schema.jsonSchemaDialect);
+  assert.equal(schema.viewUpdate.inputSchema.$schema, schema.jsonSchemaDialect);
   assert.ok(types.includes('move'));
   assert.ok(types.includes('create-folder'));
   assert.ok(types.includes('set-note'));

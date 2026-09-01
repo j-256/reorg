@@ -88,7 +88,7 @@ See [DESIGN.md](DESIGN.md#testing-strategy) for the boundaries between pure reso
 | `reorg mutate [dir] --input FILE` | apply revision-checked semantic plan commands |
 | `reorg view [dir] --input FILE` | update filters, collapse state, selection, and side-panel state |
 | `reorg view [dir] --focus ID` | reveal and select one stable node id |
-| `reorg schema` | print the machine-readable collaboration contract |
+| `reorg schema` | print the collaboration contract and JSON input schemas |
 | `reorg state move DEST --data-dir SOURCE` | relocate a stopped workspace data directory |
 | `reorg state rebind NEW_ROOT --data-dir DIR` | validate and bind state to a relocated source directory |
 | `reorg summarize [dir]` | one-line AI description per file (see below) |
@@ -125,7 +125,7 @@ The browser submits semantic commands through the token-gated server API. An age
 
 The source checkout includes one canonical [Reorg Agent Skill](.agents/skills/reorg/SKILL.md). Codex discovers it from `.agents/skills`, while Claude Code discovers the same folder through `.claude/skills`. Invoke `$reorg` in Codex or `/reorg` in Claude Code to inspect or organize a directory through the shared workspace.
 
-The Skill is instruction-only. It selects the first compatible CLI by checking `reorg schema --json`: the source-checkout command, an installed `reorg`, then `npx --yes reorg-cli@latest`. The `npx` fallback may populate npm's cache but does not install a global command. Every deterministic state transition remains in Reorg's revisioned CLI.
+The Skill is instruction-only. It selects the first compatible CLI by checking `reorg schema --json`: the source-checkout command, an installed `reorg`, then `npx --yes reorg-cli@latest`. The `npx` fallback may populate npm's cache but does not install a global command. Contract version 2 embeds JSON Schema 2020-12 definitions for mutation and view inputs alongside concise guidance generated from the same field definitions. The schemas validate portable JSON structure while every deterministic state transition and workspace-dependent check remains in Reorg's revisioned CLI.
 
 The collaboration model, concurrency contract, and decision not to add an MCP adapter are documented in [DESIGN.md](DESIGN.md#agent-integration).
 

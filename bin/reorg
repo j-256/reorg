@@ -83,7 +83,7 @@ USAGE
   reorg rescan [dir]             refresh the frozen scan without changing source files
   reorg mutate [dir]             apply semantic plan commands from JSON input
   reorg view [dir]               update shared view state from JSON or --focus
-  reorg schema                   print the machine-readable collaboration contract
+  reorg schema                   print the collaboration contract and JSON input schemas
   reorg state move DEST --data-dir SOURCE
                                  relocate a stopped portable data directory
   reorg state rebind NEW_ROOT --data-dir DIR

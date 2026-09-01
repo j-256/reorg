@@ -48,7 +48,9 @@ Apply recovery is intentionally not portable. Undo scripts, staging, and trashed
 
 The browser and agents use different transports but share one command layer. The browser submits semantic commands through the token-gated local API. An agent uses `reorg inspect`, `reorg mutate`, and `reorg view`. Neither edits workspace files directly.
 
-`reorg schema --json` publishes the collaboration contract so an integration can verify the format and version before relying on command shapes or safety behavior. Stable ids come from the frozen scan, and caller-supplied `new:` ids allow later commands in one transaction to refer to folders created earlier in that transaction.
+`reorg schema --json` publishes the collaboration contract so an integration can verify the format and version before relying on command shapes or safety behavior. Contract version 2 embeds JSON Schema 2020-12 definitions for the inputs accepted by `reorg mutate` and `reorg view`. Concise agent guidance and formal schemas derive from the same field definitions, preventing their required fields, optional fields, constraints, and descriptions from drifting apart.
+
+The schemas validate portable JSON structure rather than workspace state. Stable ids come from the frozen scan, caller-supplied `new:` ids allow later commands in one transaction to refer to folders created earlier in that transaction, and Reorg's runtime remains authoritative for node existence, parent kinds, cycles, revisions, idempotency, and resolved collisions.
 
 An agent plan mutation is one atomic transaction with an expected revision, idempotency key, actor, and semantic commands:
 
@@ -148,7 +150,7 @@ This assessment uses MCP protocol revision [`2026-07-28`](https://modelcontextpr
 
 MCP offers a standard interaction model that users and agent hosts can recognize without learning Reorg's shell choreography. For integrations that already speak MCP, a server could make Reorg feel native rather than merely callable.
 
-- Tools would accept structured objects and return structured results without an agent constructing JSON for `reorg mutate --input`. Reorg's `schema` command is a versioned, machine-readable contract, but its field descriptions are not formal JSON Schema and are not equivalent to MCP tool schemas.
+- Tools would accept structured objects and return structured results without an agent constructing JSON for `reorg mutate --input`. Reorg's versioned contract already embeds formal input schemas, so an adapter could reuse those definitions, but it would still need to publish MCP tool declarations and map results, errors, and transport behavior.
 - Tool discovery would put names, descriptions, and input schemas where the host can present them to the model and user. Hosts may also offer per-tool approval policies and use read-only or destructive annotations when presenting calls, although those controls are host behavior rather than protocol enforcement.
 - Stateless requests fit Reorg's architecture. A tool call can carry the source root or data directory, expected revision, transaction id, actor, and semantic commands while durable state remains in the workspace. The adapter would not need a second in-memory session model.
 - A local MCP server would reach hosts that support local tools but do not permit arbitrary shell commands. That is a genuine expansion beyond the Skill, not merely a different spelling of the same invocation.
@@ -202,7 +204,7 @@ src/scan.js        walk a directory, tag git status, summarize collapsed dirs
 src/plan.js        pure resolver: plan -> ordered operations (no fs, no exec)
 src/commands.js    revisioned semantic plan transactions and idempotency
 src/view.js        effective presentation projection and shared view transactions
-src/schema.js      machine-readable collaboration contract
+src/schema.js      machine-readable collaboration contract and JSON Schema inputs
 src/apply.js       execute, with drift checks, git mv, trash, undo script
 src/summarize.js   Messages API batching + the no-key agent prompt pack
 src/signals.js     cleanup signals: what looks disposable, and why (name, not age)

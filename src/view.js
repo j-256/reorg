@@ -18,9 +18,22 @@ export const SIDE_MODE = Object.freeze({
   HELP: 'help',
 });
 
+export const FILTER_TAG = Object.freeze({
+  MOVED: 'moved',
+  RENAMED: 'renamed',
+  NEW: 'new',
+  TRASHED: 'trashed',
+});
+
+export const THEME = Object.freeze({
+  AUTO: 'auto',
+  DARK: 'dark',
+  LIGHT: 'light',
+});
+
 const SIDE_MODES = new Set(Object.values(SIDE_MODE));
-const FILTER_TAGS = new Set(['moved', 'renamed', 'new', 'trashed']);
-const THEMES = new Set(['auto', 'dark', 'light']);
+const FILTER_TAGS = new Set(Object.values(FILTER_TAG));
+const THEMES = new Set(Object.values(THEME));
 const VIEW_PATCH_FIELDS = new Set(['ui', 'treeInitialized', 'collapsed', 'selectedId', 'side']);
 const UI_FIELDS = new Set(['filterText', 'filterTag', 'git', 'heat', 'theme', 'sideW']);
 const SIDE_FIELDS = new Set(['mode', 'targetId']);

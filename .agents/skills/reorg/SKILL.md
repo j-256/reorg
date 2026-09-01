@@ -9,12 +9,14 @@ Use Reorg's CLI as the only integration boundary. Let the model choose an organi
 
 ## Establish the workspace
 
-1. Select the CLI by its contract, not by the command name alone. Try these available candidates in order: `node <repo-root>/bin/reorg` when working anywhere inside a Reorg source checkout, `reorg`, then `npx --yes reorg-cli@latest`. Run `<reorg> schema --json` for each candidate and accept the first one whose `format` is `reorg-collaboration-schema` and whose `version` is `1`. The `npx` fallback may populate npm's cache but does not install a global command. If no candidate provides the contract, stop and report the incompatibility instead of guessing. Keep the accepted executable prefix for the whole workflow.
+1. Select the CLI by its contract, not by the command name alone. Try these available candidates in order: `node <repo-root>/bin/reorg` when working anywhere inside a Reorg source checkout, `reorg`, then `npx --yes reorg-cli@latest`. Run `<reorg> schema --json` for each candidate and accept the first one whose `format` is `reorg-collaboration-schema` and whose `version` is `2`. The `npx` fallback may populate npm's cache but does not install a global command. If no candidate provides the contract, stop and report the incompatibility instead of guessing. Keep the accepted executable prefix for the whole workflow.
 2. Resolve the source root and optional external data directory from the request. A bound external data directory can identify its source root, so do not require both. If neither is clear, ask for either the source root plus its external data directory when one is in use, or the already-bound data directory by itself. Ask before initializing a workspace. Preserve the same `--data-dir` in every command for that workspace.
 3. Read the accepted schema before relying on command shapes or safety behavior.
 4. Run `<reorg> inspect <root> --json [--data-dir <dir>]` before reasoning about state or making a change. Do not start the browser server merely to inspect.
 
 Never edit workspace files directly. Never treat the live filesystem or raw state files as an answer to what Reorg is displaying.
+
+Treat `planTransaction.inputSchema` and `viewUpdate.inputSchema` as the authoritative structural definitions for JSON input, and use their adjacent concise guidance for quick command selection. JSON Schema cannot establish whether a workspace node exists, a revision is current, or a plan resolves without collisions, so Reorg's inspection and runtime validation remain authoritative for those conditions.
 
 ## Interpret inspection
 
