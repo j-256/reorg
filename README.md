@@ -95,7 +95,7 @@ See [DESIGN.md](DESIGN.md#testing-strategy) for the boundaries between pure reso
 | `reorg triage [dir]` | rank likely-disposable entries and say why |
 | `reorg --version` | print the installed reorg version |
 
-Short aliases are `-s` for `--static`, `-o` for `--output`, `-p` for `--port`, `-y` for `--yes`, `-v` for `--version`, and `-h` for `--help`. `--plan` stays long-only so `-p` is unambiguously the port.
+Short aliases are `-c` for `--collapse-over`, `-d` for `--data-dir`, `-e` for `--emit-prompts`, `-f` for `--force`, `-i` for `--ingest`, `-j` for `--json`, `-l` for `--limit`, `-m` for `--model`, `-o` for `--output`, `-p` for `--port`, `-s` for `--static`, `-y` for `--yes`, `-v` for `--version`, and `-h` for `--help`. Safety controls, negations, collaboration metadata, and collision siblings stay long-only; in particular, `--plan` stays long-only so `-p` is unambiguously the port.
 
 In the planner:
 

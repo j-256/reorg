@@ -95,25 +95,25 @@ OPTIONS
   -s, --static       write and open a self-contained HTML planner, with no server
   -o, --output FILE  with --static: write FILE instead of a temporary page
   --plan FILE        with 'apply': read an exported plan; use - for stdin
-  --data-dir DIR     store portable scan, plan, view, and history outside the root
+  -d, --data-dir DIR store portable scan, plan, view, and history outside the root
   --allow-apply      enable browser apply for this server session; off by default
   --input FILE       with 'mutate' or 'view': read JSON input; use - for stdin
   --expected-revision N  reject a stale plan or view mutation
   --transaction-id ID   idempotency key for a plan mutation
   --actor NAME       attribution recorded with a plan mutation
   --focus ID         with 'view': reveal and select a stable node id
-  --json             emit machine-readable output where supported
+  -j, --json         emit machine-readable output where supported
   -y, --yes          with 'apply': execute instead of dry-running
   --all              descend into everything, ignoring the collapse rules
   --no-hidden        skip dotfiles entirely
   --max-nodes N      stop scanning past N entries (default 20000)
-  --collapse-over N  show any dir holding more than N files as one row (default 400)
+  -c, --collapse-over N  show any dir holding more than N files as one row (default 400)
   --depth N          stop descending past depth N (default 24)
-  --emit-prompts     with 'summarize': write a prompt pack for your coding agent
-  --ingest           with 'summarize': merge an agent-filled summaries.json
-  --model ID         with 'summarize': model to call (default ${DEFAULT_MODEL})
-  --force            with 'summarize': re-summarize files that already have one
-  --limit N          with 'triage': show at most N candidates (default 30)
+  -e, --emit-prompts with 'summarize': write a prompt pack for your coding agent
+  -i, --ingest       with 'summarize': merge an agent-filled summaries.json
+  -m, --model ID     with 'summarize': model to call (default ${DEFAULT_MODEL})
+  -f, --force        with 'summarize': re-summarize files that already have one
+  -l, --limit N      with 'triage': show at most N candidates (default 30)
   -v, --version      show version and exit
   -h, --help         this text
 
@@ -167,11 +167,11 @@ function parseArgs(argv) {
     else if (a === '--yes' || a === '-y') opts.yes = true;
     else if (a === '--all') opts.all = true;
     else if (a === '--no-hidden') opts.hidden = false;
-    else if (a === '--emit-prompts') opts.emitPrompts = true;
-    else if (a === '--ingest') opts.ingest = true;
-    else if (a === '--force') opts.force = true;
-    else if (a === '--json') opts.json = true;
-    else if (a === '--data-dir') opts.dataDir = value();
+    else if (a === '--emit-prompts' || a === '-e') opts.emitPrompts = true;
+    else if (a === '--ingest' || a === '-i') opts.ingest = true;
+    else if (a === '--force' || a === '-f') opts.force = true;
+    else if (a === '--json' || a === '-j') opts.json = true;
+    else if (a === '--data-dir' || a === '-d') opts.dataDir = value();
     else if (a === '--input') opts.input = value();
     else if (a === '--expected-revision') opts.expectedRevision = parseInt(value(), 10);
     else if (a === '--transaction-id') opts.transactionId = value();
@@ -181,10 +181,10 @@ function parseArgs(argv) {
     else if (a === '--plan') opts.planInput = value();
     else if (a === '--port' || a === '-p') opts.port = parseInt(value(), 10);
     else if (a === '--max-nodes') opts.maxNodes = parseInt(value(), 10);
-    else if (a === '--collapse-over') opts.collapseOver = parseInt(value(), 10);
+    else if (a === '--collapse-over' || a === '-c') opts.collapseOver = parseInt(value(), 10);
     else if (a === '--depth') opts.maxDepth = parseInt(value(), 10);
-    else if (a === '--model') opts.model = value();
-    else if (a === '--limit') opts.limit = parseInt(value(), 10);
+    else if (a === '--model' || a === '-m') opts.model = value();
+    else if (a === '--limit' || a === '-l') opts.limit = parseInt(value(), 10);
     else if (a.startsWith('-')) {
       console.error(`reorg: unknown option ${a}\nTry: reorg --help`);
       process.exit(2);
