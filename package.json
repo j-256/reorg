@@ -1,6 +1,6 @@
 {
   "name": "reorg-cli",
-  "version": "0.7.0",
+  "version": "1.6.0",
   "description": "Plan directory reorganizations yourself or with an AI agent, collaborate through a live browser plan, and safely apply changes with generated undo scripts.",
   "keywords": [
     "cleanup",
