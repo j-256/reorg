@@ -765,6 +765,36 @@ test('an apply-enabled browser confirms, applies, and adopts the refreshed works
   }
 });
 
+test('the browser reports partial apply outcomes with recovery instructions', async () => {
+  const p = await planner(TREE, { allowApply: true });
+  const undoPath = `/fixture/${'long-directory-'.repeat(12)}/.reorg/undo-test-run.sh`;
+  try {
+    await dragRow(p.page, 'keep.txt', 'docs', 'into');
+    await p.settled();
+    await p.page.route('**/api/apply*', route => route.fulfill({
+      status: 409,
+      contentType: 'application/json',
+      body: JSON.stringify({ problems: ['Simulated filesystem failure'], partial: true,
+        code: 'apply-interrupted', applied: 1, stamp: 'test-run', undoPath }),
+    }));
+    await p.page.getByRole('button', { name: 'review plan', exact: true }).click();
+    p.page.once('dialog', dialog => dialog.accept());
+    await p.page.getByRole('button', { name: 'apply 1 operation(s) to disk', exact: true }).click();
+    await p.page.waitForSelector('text=Apply stopped partway through');
+    const review = await p.page.locator('#sideBody').textContent();
+    assert.match(review, /test-run.*stopped after 1 completed operation/);
+    assert.ok(review.includes('Recovery script: ' + undoPath));
+    assert.match(review, /Simulated filesystem failure/);
+    assert.doesNotMatch(await p.page.locator('body').textContent(), /nothing was applied/);
+    await p.page.setViewportSize({ width: 390, height: 844 });
+    assert.equal(await p.page.locator('.problem').evaluateAll(elements =>
+      elements.every(element => element.scrollWidth <= element.clientWidth + 1)
+    ), true, 'recovery paths remain readable on narrow screens');
+  } finally {
+    await p.close();
+  }
+});
+
 test('a safety check keeps the reviewed operations and next actions visible', async () => {
   const p = await planner(TREE);
   try {

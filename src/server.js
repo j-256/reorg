@@ -404,7 +404,15 @@ export function createReorgServer({
           }
           return { result: applied, log: lines };
         });
-        if (result.problems.length) return sendJson(res, 409, { problems: result.problems });
+        if (result.problems.length) return sendJson(res, 409, {
+          problems: result.problems,
+          code: result.code,
+          partial: result.partial || false,
+          applied: result.applied || 0,
+          stamp: result.stamp,
+          undoPath: result.undoPath,
+          durationMs: result.durationMs,
+        });
         return sendJson(res, 200, {
           ...result,
           log,

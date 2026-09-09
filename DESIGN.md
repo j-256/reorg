@@ -106,6 +106,12 @@ Whole-batch drift validation matters because stopping after a partial collision 
 
 Preflight inspects each existing parent directory with `lstat` so a replaced parent cannot redirect source operations or recovery writes through a symlink. The final entry may still be a link when it is being moved or trashed. Existing staging entries are recovery data and block a conflicting run. These checks detect drift present at inspection time; they do not make filesystem operations atomic against unrelated processes changing the tree concurrently.
 
+Each apply owns a journal under `.reorg/runs/<run>/`. Before a rename, it flushes an intent containing the exact source, destination, and filesystem entry identity. Recovery walks only those attempted operations in reverse, including each staging hop, and durably advances a cursor. Identity and occupancy checks distinguish an interrupted attempt from a completed rename or an interrupted inverse. A conflict stops recovery at that cursor; it cannot silently skip a dependency and report success. New source directories originate as owned empty directories in the run directory, giving them an identity before installation and avoiding removal of pre-existing directories during undo.
+
+The Bash undo entrypoint embeds the standard-library Node recovery implementation so it remains independent of the installed Reorg source. It requires its neighboring journal, refuses identity changes and symlinked parents, and serializes with apply through a source-local recovery lock even when portable planning state lives elsewhere. Abrupt process exits retain the last flushed intent or cursor; recovery reclaims locks whose owning processes have exited. Malformed locks, copied filesystem identities, and storage failures that prevent reading recovery data require manual review. These process-interruption tests do not establish recovery from hardware failure or filesystem corruption.
+
+Apply failures preserve the plan and return a partial outcome with run identity, completed operation count, elapsed time, and recovery location. The run journal and append-only history retain the failure for diagnosis, and CLI, HTTP, and browser messages distinguish that outcome from preflight rejection. Portable workspace moves leave the journals, scripts, staging, and source recovery lock beside the source tree.
+
 ## Planner boundaries
 
 ### Live planner

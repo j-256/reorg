@@ -64,7 +64,7 @@ import { collaborationSchema } from '../src/schema.js';
 
 const VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 
-const RECOVERY_ENTRY_NAMES = new Set(['history.jsonl', 'stage', 'trash']);
+const RECOVERY_ENTRY_NAMES = new Set(['history.jsonl', 'stage', 'unstage', 'trash', 'runs', 'apply.lock']);
 
 const HELP = `reorg ${VERSION} -- plan alone or collaborate with an AI agent, then apply safely.
 
@@ -765,9 +765,12 @@ async function main() {
     };
     const res = imported ? execute() : withWorkspaceLock(root, dataDir, execute);
     if (res.problems.length) {
-      console.error('\nAborted before making any change:\n');
+      console.error(res.partial
+        ? `\nApply run ${res.stamp} stopped after ${res.applied} completed operation(s):\n`
+        : '\nAborted before moving source entries:\n');
       for (const p of res.problems) console.error(`  - ${p}`);
-      console.error('\nThe tree changed since the scan. Rescan in the planner and retry.');
+      if (res.partial) console.error(`\nRecovery: bash ${shellQuote(res.undoPath)}`);
+      else console.error('\nReview the reported drift or recovery conflict before retrying.');
       process.exit(1);
     }
     console.log(`\nDone: ${res.applied} operation(s).`);
@@ -797,7 +800,7 @@ async function main() {
         child.on('error', reject);
         child.on('exit', (status) => done(status ?? 1));
       });
-      if (workspace) {
+      if (workspace && code === 0) {
         const frozen = loadScan(root, dataDir);
         saveScan(root, scan(root, { ...(frozen?.options || {}), ...scanOpts(opts) }), dataDir);
         console.log('Refreshed the shared scan after undo.');

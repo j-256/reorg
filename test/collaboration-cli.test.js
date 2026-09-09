@@ -189,7 +189,7 @@ test('moving default workspace data leaves apply recovery beside the source tree
     const applied = runCli(['apply', root, '--yes']);
     assert.equal(applied.status, 0, applied.stderr);
     const recoveryBefore = readdirSync(defaultData).filter((name) =>
-      /^undo-\d+\.sh$/.test(name) || name === 'history.jsonl' || name === 'trash'
+      /^undo-\d+\.sh$/.test(name) || name === 'history.jsonl' || name === 'trash' || name === 'runs'
     );
     assert.ok(recoveryBefore.length > 0);
 
@@ -198,6 +198,7 @@ test('moving default workspace data leaves apply recovery beside the source tree
     assert.ok(existsSync(join(external, 'workspace.json')));
     assert.equal(existsSync(join(defaultData, 'workspace.json')), false);
     for (const name of recoveryBefore) assert.ok(existsSync(join(defaultData, name)));
+    assert.equal(existsSync(join(external, 'runs')), false, 'run journals stay beside source entries');
 
     const movedBack = runJson(['state', 'move', defaultData, '--data-dir', external]);
     assert.equal(movedBack.method, 'merge-copy');

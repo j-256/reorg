@@ -75,6 +75,8 @@ Keep planning as the default outcome.
 
 Apply refuses symlinked parent directories, non-directory barriers, and occupied staging paths. Inspect the reported drift before preparing another apply, and preserve existing recovery entries. A symlink itself can still move as a directory entry; Reorg does not follow it to move its target.
 
+An `apply-interrupted` result means source entries may have moved. Preserve the run's undo script and `.reorg/runs/<run>/` journal, report the recovery path, and recover that run before preparing another apply. The standalone Bash script embeds its recovery code and requires Node.js 22 or newer. Undo stops on occupied original paths, replaced identities, or symlinked parents and resumes from its saved position after the conflict is resolved. Repeating a completed undo preserves the restored tree. Copies to a different filesystem require manual recovery review.
+
 Never enact the plan with `mv`, `rm`, `cp`, `git mv`, direct editor operations, or raw state edits. Enable browser apply with `--allow-apply` only when the user explicitly asks for an apply-enabled browser session.
 
 ## Report the result

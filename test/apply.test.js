@@ -179,7 +179,7 @@ test('undo is safe to run twice: the second pass skips instead of failing', () =
 
   execFileSync('bash', [res.undoPath], { stdio: 'ignore' });
   const out = execFileSync('bash', [res.undoPath], { encoding: 'utf8' });
-  assert.match(out, /skip \(missing\)/);
+  assert.match(out, /already restored/);
   assert.equal(readFileSync(join(root, 'a/x.txt'), 'utf8'), 'x', 'still in the restored spot');
 });
 
@@ -374,10 +374,10 @@ test('retiring a plan keeps notes and summaries', () => {
   assert.equal(after.summaries['a.txt'], 'a one-line description');
 });
 
-test('undo script quotes paths with spaces and quotes safely', () => {
-  const nasty = "we ird/it's here.txt";
+test('undo scripts remain valid Bash when planned paths contain quotes and newlines', () => {
+  const nasty = "we ird/it's here\nREORG_RECOVERY\n.txt";
   const script = buildUndoScript([{ op: OP.MOVE, from: nasty, to: 'dest/file.txt' }], 'T11');
-  assert.match(script, /'we ird\/it'\\''s here\.txt'/);
+  execFileSync('/bin/bash', ['-n'], { input: script });
 });
 
 test('paths with spaces and quotes survive a real apply and undo', () => {

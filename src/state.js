@@ -461,7 +461,7 @@ export function logLine(root, entry) {
 }
 
 export function listUndoScripts(root) {
-  const dir = recoveryDir(root);
+  const dir = validateDataDir(root);
   if (!existsSync(dir)) return [];
   return readdirSync(dir)
     .filter((f) => /^undo-\d+\.sh$/.test(f))

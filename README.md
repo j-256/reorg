@@ -212,12 +212,14 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 - **Nothing is deleted.** "Trash" moves into `.reorg/trash/<run>/`. Emptying that is a separate decision you make yourself.
 - **Drift aborts the whole batch.** Every source path is checked to still exist and every destination to be free *before* the first move. If the tree changed since the scan, nothing is applied – not "nothing further", nothing at all.
 - **Directory traversal stays inside the selected root.** Apply refuses symlinked parents, non-directory barriers, and occupied staging paths. Links themselves remain movable entries, including broken links. The default `.reorg/` directory must be a real directory.
-- **An undo script is written before execution starts**, so even a crash mid-run leaves a way back. It is guarded per step, so running it after a partial apply undoes only what happened.
+- **An undo script and recovery journal are written before execution starts.** Each filesystem operation records its intent and entry identity before running. Undo reverses those attempts and saves its progress, including through rename cycles and interrupted recovery. Repeating a completed undo leaves the restored tree alone.
 - **Collisions are caught at plan time**, not discovered at move time: two entries landing on one path, a folder marked for trash that still holds things you kept, a folder dragged inside itself.
 - **`git mv` for tracked files**, so history follows the move. (Git refuses this on a fully-untracked directory; Reorg falls back to a plain rename there.)
 - **Rename cycles work.** Swapping two names is impossible with direct renames in any order, so Reorg routes cycle members through a staging directory instead of failing.
 
 The default `.reorg/` workspace git-ignores itself on creation, so planning a repo's layout never dirties that repo. See [DESIGN.md](DESIGN.md#plan-representation-and-resolution) for how the semantic plan becomes ordered, recoverable operations.
+
+Keep `.reorg/runs/<run>/` beside its `undo-<run>.sh` script. The script embeds its recovery code and requires Bash and Node.js 22 or newer; it does not require an installed Reorg package. It returns a failure if an original path is occupied, an entry was replaced, or a parent became a symlink. Preserve the reported entries, resolve the conflict, and rerun the same script to resume. Recovery verifies filesystem identities, so copying a tree to another filesystem or restoring files from backup requires manual review. An interrupted apply reports its run, completed operations, and recovery script in both the terminal and browser; recover that run before preparing another apply.
 
 ## File summaries
 

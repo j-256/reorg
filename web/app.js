@@ -1003,6 +1003,14 @@ export async function runApply() {
     });
     toast(`Applied ${res.applied} operation(s). Undo: bash ${res.undoPath}`);
   } catch (e) {
+    if (e.payload?.partial) {
+      const recovery = `Apply run ${e.payload.stamp} stopped after ${e.payload.applied} completed operation(s). Recovery script: ${e.payload.undoPath}. Run it with Bash before preparing another apply.`;
+      showReview([{ message: recovery }, ...e.payload.problems.map(problem =>
+        typeof problem === 'string' ? { message: problem } : problem
+      )]);
+      toast('Apply stopped partway through. See Review for recovery instructions.', true);
+      return;
+    }
     if (e.payload?.problems?.length) {
       showReview(e.payload.problems.map((problem) =>
         typeof problem === 'string' ? { message: problem } : problem
