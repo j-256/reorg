@@ -131,12 +131,9 @@ export function isDescendant(nodes, id, maybeAncestorId) {
  *
  * Returns { ops, problems, stats }.
  *
- * Ordering rules that matter:
- *  - mkdir before any move that targets the new dir (shallowest first).
- *  - a node is moved only if its own path changed for a reason its ancestors
- *    don't already cover: moving `a/` to `b/a/` relocates `a/x` implicitly, so
- *    emitting a separate move for `a/x` would be wrong (its source is gone).
- *  - trash last, so a moved-then-trashed node is trashed at its new location.
+ * Extract changed descendants before their original parents move
+ * Install final parents before their contents, staging conflicting dependencies
+ * Unchanged descendants travel with their parent, and trash runs at final paths
  */
 export function resolve(scanResult, plan) {
   const nodes = buildNodes(scanResult, plan);
@@ -198,9 +195,7 @@ export function resolve(scanResult, plan) {
   // --- mkdir: created dirs, shallowest first ----------------------------------
   const created = [...nodes.values()].filter((n) => !n.orig && !n.evicted);
   created.sort((a, b) => pathOf(nodes, a.id).split('/').length - pathOf(nodes, b.id).split('/').length);
-  for (const n of created) {
-    ops.push({ op: OP.MKDIR, id: n.id, to: pathOf(nodes, n.id) });
-  }
+  const mkdirs = created.map(n => ({ op: OP.MKDIR, id: n.id, to: pathOf(nodes, n.id) }));
 
   // --- move: only nodes whose own position changed -----------------------------
   // `parentId` is an id reference, not a path, so a node whose `cur` is untouched
@@ -216,7 +211,7 @@ export function resolve(scanResult, plan) {
     if (from === to) continue;
     moves.push({ op: OP.MOVE, id: n.id, from, to, kind: n.kind, git: n.git });
   }
-  ops.push(...orderMoves(moves));
+  ops.push(...orderMoves(moves, mkdirs));
 
   // --- trash: last, at the node's post-move location --------------------------
   const trashed = [...nodes.values()].filter((n) => n.evicted && n.orig);
@@ -262,7 +257,7 @@ function emptyStats() {
  * cycles with a staging hop.
  *
  * Destinations are computed from the *final* tree, which collapses what would
- * otherwise be a tangle of cases into two prerequisite rules:
+ * otherwise be a tangle of cases into prerequisite rules:
  *
  *  1. Vacate before occupy. If X's destination is at or under Y's source path,
  *     Y must move away first -- otherwise X lands on something still there.
@@ -270,11 +265,12 @@ function emptyStats() {
  *     arrive first. Skipping this lets `mkdir -p` of X's parent conjure a
  *     directory at Y's destination, and Y then finds its target occupied.
  *
- * A cycle between those rules means no order works (canonical case: swapping two
- * names). Cycle members route through .reorg/stage/, which always breaks it.
+ * Changed descendants also have to leave before their original parent moves
+ * Conflicting dependencies or creation under moving paths use staged extraction
+ * followed by placement in final-path depth order
  */
-function orderMoves(moves) {
-  if (moves.length <= 1) return moves;
+function orderMoves(moves, mkdirs = []) {
+  if (!moves.length) return mkdirs;
 
   // deps.get(x) = moves that must run BEFORE x.
   const deps = new Map(moves.map((m) => [m.from, new Set()]));
@@ -290,6 +286,8 @@ function orderMoves(moves) {
       if (x.to === y.from || isUnder(x.to, y.from)) need(x.from, y.from);
       // 2. x lands inside where y is going.
       if (isUnder(x.to, y.to)) need(x.from, y.from);
+      // Extract a changed descendant before its original parent moves away
+      if (isUnder(y.from, x.from)) need(x.from, y.from);
     }
   }
 
@@ -319,21 +317,28 @@ function orderMoves(moves) {
     visit(m.from, []);
   }
 
-  if (!cyclic.size) return out;
+  const movingCreation = mkdirs.some(directory => moves.some(move =>
+    directory.to === move.from || isUnder(directory.to, move.from) || isUnder(directory.to, move.to)
+  ));
+  if (!cyclic.size && !movingCreation) return [...mkdirs, ...out];
 
-  const staged = out.filter((m) => cyclic.has(m.from));
-  const direct = out.filter((m) => !cyclic.has(m.from));
+  // Extract deepest sources first, then install final parents before children
+  // Independent bounded slot names keep nested sources from sharing a stage path
+  const staged = [...moves].sort((a, b) => depth(b.from) - depth(a.from) || COLLATE(a.from, b.from));
+  const landings = [
+    ...mkdirs,
+    ...staged.map((move, index) => ({ ...move, op: OP.UNSTAGE, from: stagePath(index), origFrom: move.from })),
+  ].sort((a, b) => depth(a.to) - depth(b.to) || COLLATE(a.to, b.to));
   return [
-    ...staged.map((m) => ({ ...m, op: OP.STAGE, to: stagePath(m.from), finalTo: m.to })),
-    ...direct,
-    ...staged.map((m) => ({ ...m, op: OP.UNSTAGE, from: stagePath(m.from), to: m.to, origFrom: m.from })),
+    ...staged.map((move, index) => ({ ...move, op: OP.STAGE, to: stagePath(index), finalTo: move.to })),
+    ...landings,
   ];
 }
 
 export const STAGE_PREFIX = '.reorg/stage';
 
-function stagePath(from) {
-  return `${STAGE_PREFIX}/${from}`;
+function stagePath(index) {
+  return `${STAGE_PREFIX}/${index}`;
 }
 
 /** One-line human summary of an op, used by dry-run output and the undo script. */
@@ -344,7 +349,7 @@ export function describeOp(op) {
     case OP.MOVE:
       return `mv     ${op.from}  ->  ${op.to}`;
     case OP.STAGE:
-      return `stage  ${op.from}  ->  ${op.to}  (breaks a rename cycle)`;
+      return `stage  ${op.from}  ->  ${op.to}  (prepares dependent moves)`;
     case OP.UNSTAGE:
       return `mv     ${op.from}  ->  ${op.to}`;
     case OP.TRASH:

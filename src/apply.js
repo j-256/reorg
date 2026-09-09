@@ -85,59 +85,88 @@ export function checkDrift(root, ops) {
   }
   if (problems.length) return problems;
 
-  const directories = new Set([STATE_DIR, `${STATE_DIR}/stage`, `${STATE_DIR}/${TRASH_DIR}`, `${STATE_DIR}/${RUNS_DIR}`]);
-  for (const op of ops) {
-    for (const field of OP_PATH_FIELDS) {
-      if (op[field] !== undefined) directories.add(dirname(op[field]));
-    }
-    if (op.op === OP.MKDIR) directories.add(op.to);
-  }
+  const directories = [STATE_DIR, STATE_DIR + '/stage', STATE_DIR + '/' + TRASH_DIR, STATE_DIR + '/' + RUNS_DIR];
   for (const directory of directories) {
     const problem = directoryProblem(root, directory);
     if (problem) problems.push(problem);
   }
   if (problems.length) return [...new Set(problems)];
 
-  // Track paths this run will create, so a move into a just-made dir, or a move
-  // whose destination is vacated by an earlier move, is not flagged.
-  const willExist = new Set();
-  const willVacate = new Set();
-
-  for (const op of ops) {
-    if (op.op === OP.MKDIR) {
-      const abs = join(root, op.to);
-      if (pathExists(abs)) {
-        // Already there: harmless, mkdir -p semantics. Only a file in the way is fatal.
-        try {
-          if (!lstatSync(abs).isDirectory()) {
-            problems.push(`${op.to} exists and is not a directory (cannot create it).`);
-          }
-        } catch {
-          /* raced; treat as absent */
+  // Replay prior operations backwards to locate an entry in the original tree
+  // This accounts for descendants carried by a moved directory without scanning it
+  const changes = [];
+  const normalize = location => relative(resolvePath(root), resolvePath(root, location));
+  const under = (child, parent) => child.startsWith(parent + sep);
+  const entryAt = location => {
+    let original = location;
+    if (!original) return 'dir';
+    for (let index = changes.length - 1; index >= 0; index--) {
+      const change = changes[index];
+      if (change.op === OP.MKDIR) {
+        if (original === change.to) return 'dir';
+        if (under(original, change.to)) return null;
+      } else if (change.op === OP.TRASH) {
+        if (original === change.from || under(original, change.from)) return null;
+      } else {
+        if (original === change.to || under(original, change.to)) {
+          original = change.from + original.slice(change.to.length);
+        } else if (original === change.from || under(original, change.from)) {
+          return null;
         }
       }
-      willExist.add(op.to);
-      continue;
     }
-    if (op.op === OP.MOVE || op.op === OP.STAGE || op.op === OP.UNSTAGE) {
-      const src = join(root, op.from);
-      if (!pathExists(src) && !willExist.has(op.from)) {
-        problems.push(`${op.from} no longer exists (moved or deleted since the scan).`);
-      }
-      const dst = join(root, op.to);
-      if (pathExists(dst) && !willVacate.has(op.to)) {
-        problems.push(`${op.to} already exists; refusing to overwrite it.`);
-      }
-      willVacate.add(op.from);
-      willExist.add(op.to);
-      continue;
+    const problem = directoryProblem(root, dirname(original));
+    if (problem) throw new Error(problem);
+    try {
+      const entry = lstatSync(join(root, original));
+      return entry.isSymbolicLink() ? 'link' : entry.isDirectory() ? 'dir' : 'file';
+    } catch (error) {
+      if (error.code === 'ENOENT') return null;
+      throw error;
     }
-    if (op.op === OP.TRASH) {
-      const abs = join(root, op.to);
-      if (!pathExists(abs) && !willExist.has(op.to)) {
-        problems.push(`${op.to} no longer exists (nothing to trash).`);
+  };
+  const checkParents = (location, createRecovery = false) => {
+    const parts = location.split(sep).slice(0, -1);
+    let parent = '';
+    for (const part of parts) {
+      parent = parent ? parent + sep + part : part;
+      const kind = entryAt(parent);
+      if (kind === null && createRecovery && (parent === STATE_DIR || under(parent, STATE_DIR))) {
+        changes.push({ op: OP.MKDIR, to: parent });
+      } else if (kind === 'link') {
+        throw new Error(parent + ' is a symbolic link; refusing to follow it.');
+      } else if (kind === null) {
+        throw new Error(parent + ' no longer exists (required parent directory).');
+      } else if (kind !== 'dir') {
+        throw new Error(parent + ' is not a directory.');
       }
-      willVacate.add(op.to);
+    }
+  };
+
+  for (const op of ops) {
+    try {
+      const to = normalize(op.to);
+      checkParents(to, op.op === OP.STAGE);
+      if (op.op === OP.MKDIR) {
+        const kind = entryAt(to);
+        if (kind === 'link') throw new Error(op.to + ' is a symbolic link; refusing to follow it.');
+        if (kind !== null && kind !== 'dir') throw new Error(op.to + ' is not a directory.');
+        if (kind === null) changes.push({ op: OP.MKDIR, to });
+      } else if (op.op === OP.TRASH) {
+        if (!entryAt(to)) throw new Error(op.to + ' no longer exists (nothing to trash).');
+        changes.push({ op: OP.TRASH, from: to });
+      } else {
+        const from = normalize(op.from);
+        checkParents(from);
+        const kind = entryAt(from);
+        if (kind === null) throw new Error(op.from + ' no longer exists (moved or deleted since the scan).');
+        if (op.kind && kind !== op.kind) throw new Error(op.from + ' changed entry kind since the scan.');
+        if (entryAt(to)) throw new Error(op.to + ' already exists; refusing to overwrite it.');
+        if (under(to, from)) throw new Error(op.from + ' cannot move inside itself.');
+        changes.push({ op: OP.MOVE, from, to });
+      }
+    } catch (error) {
+      problems.push(error.message);
     }
   }
   return problems;

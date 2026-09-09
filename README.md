@@ -215,7 +215,7 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 - **An undo script and recovery journal are written before execution starts.** Each filesystem operation records its intent and entry identity before running. Undo reverses those attempts and saves its progress, including through rename cycles and interrupted recovery. Repeating a completed undo leaves the restored tree alone.
 - **Collisions are caught at plan time**, not discovered at move time: two entries landing on one path, a folder marked for trash that still holds things you kept, a folder dragged inside itself.
 - **`git mv` for tracked files**, so history follows the move. (Git refuses this on a fully-untracked directory; Reorg falls back to a plain rename there.)
-- **Rename cycles work.** Swapping two names is impossible with direct renames in any order, so Reorg routes cycle members through a staging directory instead of failing.
+- **Rename cycles and nested moves use ordered staging when needed.** Changed descendants leave before their original parents move, and final directories arrive before their contents. Staged operations use plain renames; review the Git index afterward.
 
 The default `.reorg/` workspace git-ignores itself on creation, so planning a repo's layout never dirties that repo. See [DESIGN.md](DESIGN.md#plan-representation-and-resolution) for how the semantic plan becomes ordered, recoverable operations.
 

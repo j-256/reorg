@@ -1,9 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, mkdirSync, readFileSync, renameSync, rmdirSync, symlinkSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { apply } from '../src/apply.js';
-import { resolve } from '../src/plan.js';
+import { resolve, OP } from '../src/plan.js';
 import { scan } from '../src/scan.js';
 import { ensureStateDir } from '../src/state.js';
 import { sandbox, cleanup } from './helpers.js';
@@ -83,12 +83,13 @@ test('an occupied cycle staging path aborts without overwriting recovery', (t) =
     { id: 'a', cur: { name: 'b', parentId: '.' } },
     { id: 'b', cur: { name: 'a', parentId: '.' } },
   ] });
-  mkdirSync(join(root, '.reorg/stage'), { recursive: true });
-  writeFileSync(join(root, '.reorg/stage/a'), 'previous recovery');
+  const stagingPath = join(root, ops.find(op => op.op === OP.STAGE).to);
+  mkdirSync(dirname(stagingPath), { recursive: true });
+  writeFileSync(stagingPath, 'previous recovery');
   const result = apply(root, ops, { dryRun: false, useGit: false });
   assert.equal(result.applied, 0);
   assert.match(result.problems.join('\n'), /already exists/);
-  assert.equal(readFileSync(join(root, '.reorg/stage/a'), 'utf8'), 'previous recovery');
+  assert.equal(readFileSync(stagingPath, 'utf8'), 'previous recovery');
   assert.equal(readFileSync(join(root, 'a'), 'utf8'), 'A');
 });
 

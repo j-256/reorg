@@ -76,15 +76,11 @@ View changes use their own revision-checked patch. Focusing an entry reveals its
 
 The plan is a semantic diff against the frozen scan rather than a second mutable copy of the tree. Every scanned entry has a stable id, an original position, and a planned position. Created folders, trash decisions, notes, and summaries extend that diff without modifying source entries.
 
-Resolving a valid plan produces operations in dependency order:
-
-1. `mkdir` operations for created folders, shallowest first
-2. `mv` operations only for entries whose own position changed
-3. `trash` operations at each entry's post-move location
+Resolving a valid plan orders directory creation and moves by their dependencies, then trashes entries at their final locations. Uncomplicated moves remain direct operations so tracked paths can use `git mv`.
 
 Moving a directory relocates its unchanged descendants implicitly. Emitting separate moves for those descendants would refer to source paths that no longer exist. Destinations use final-tree paths so each changed entry moves once.
 
-Move ordering is a topological sort over two constraints: vacate before occupy when one entry lands where another still sits, and parent before child when an entry lands inside a directory that is also moving. When those constraints form a cycle, Reorg routes the cycle through staging rather than pretending a direct order exists.
+Move ordering is a topological sort over source and destination constraints: vacate before occupy, install destination parents before their contents, and extract changed descendants before their original parent moves. A dependency cycle or directory creation beneath moving paths uses staged extraction, deepest source first, followed by directory creation and placement in final-path depth order. Staging uses separate bounded slot names so a nested source cannot collide with its parent's staging location or exceed a filesystem filename limit. Staged operations use plain renames; review the Git index afterward.
 
 The resolver detects duplicate destinations, retained entries inside trashed directories, moves into descendants, and other structural contradictions before the apply engine sees them. Keeping resolution pure makes these rules testable without filesystem effects.
 
@@ -102,7 +98,7 @@ The user-visible guarantees are summarized in [README.md](README.md#safety). The
 - Tracked files use `git mv` when possible, with a plain rename fallback where Git cannot represent the move
 - Rename cycles use staging so swaps and longer cycles remain reversible
 
-Whole-batch drift validation matters because stopping after a partial collision would leave the directory in a shape that neither the frozen scan nor the intended plan describes. The preflight therefore aborts before any operation when the live filesystem no longer matches the prepared sources and destinations.
+Whole-batch drift validation matters because stopping after a partial collision would leave the directory in a shape that neither the frozen scan nor the intended plan describes. Preflight simulates preceding operations and maps each later path back to the original live tree. It follows descendants carried by directory moves, checks required parents and entry kinds, and detects collisions that would arrive with a moved subtree before source entries change.
 
 Preflight inspects each existing parent directory with `lstat` so a replaced parent cannot redirect source operations or recovery writes through a symlink. The final entry may still be a link when it is being moved or trashed. Existing staging entries are recovery data and block a conflicting run. These checks detect drift present at inspection time; they do not make filesystem operations atomic against unrelated processes changing the tree concurrently.
 
