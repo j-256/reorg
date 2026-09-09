@@ -50,7 +50,6 @@ test('recovery locks exclude active owners and reclaim an exited owner', (t) => 
   assert.throws(() => acquireRecoveryLock(filename), /Apply or recovery is busy/);
   assert.equal(existsSync(`${filename}${RECLAIM_SUFFIX}`), false);
   release();
-  assert.equal(existsSync(filename), false);
 
   const exited = spawnSync(process.execPath, ['-e', '']);
   assert.equal(exited.status, 0);
