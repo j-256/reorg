@@ -2,9 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { readFileSync } from 'node:fs';
+import { existsSync, linkSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { acquireRecoveryLock, RECOVERY_LOCK_FILE } from '../src/recovery.js';
 import { listUndoScripts } from '../src/state.js';
 import { sandbox, cleanup } from './helpers.js';
 
@@ -13,6 +14,7 @@ const HOOK = new URL('./fixtures/recovery-crash.mjs', import.meta.url);
 const SERVER = new URL('../src/server.js', import.meta.url);
 const FAILURE_ENV = { ...process.env, REORG_TEST_CRASH_AFTER: '2', REORG_TEST_CRASH_BOUNDARY: 'throw-before' };
 const COMMANDS = [{ type: 'rename', id: 'a', name: 'renamed-a' }, { type: 'rename', id: 'b', name: 'renamed-b' }];
+const RECLAIM_SUFFIX = '.reclaim';
 
 function prepare(t) {
   const root = sandbox({ a: 'A', b: 'B' });
@@ -36,6 +38,48 @@ function verifyRecovery(root) {
   assert.equal(readFileSync(join(root, 'a'), 'utf8'), 'A');
   assert.equal(readFileSync(join(root, 'b'), 'utf8'), 'B');
 }
+
+test('recovery locks exclude active owners and reclaim an exited owner', (t) => {
+  const root = sandbox({});
+  t.after(() => cleanup(root));
+  const state = join(root, '.reorg');
+  const filename = join(state, RECOVERY_LOCK_FILE);
+  mkdirSync(state);
+
+  const release = acquireRecoveryLock(filename);
+  assert.throws(() => acquireRecoveryLock(filename), /Apply or recovery is busy/);
+  assert.equal(existsSync(`${filename}${RECLAIM_SUFFIX}`), false);
+  release();
+
+  const exited = spawnSync(process.execPath, ['-e', '']);
+  assert.equal(exited.status, 0);
+  writeFileSync(filename, JSON.stringify({ pid: exited.pid, token: 'stale' }), { flag: 'wx', mode: 0o600 });
+  const releaseReclaimed = acquireRecoveryLock(filename);
+  releaseReclaimed();
+  assert.equal(existsSync(filename), false);
+});
+
+test('recovery lock reclamation rejects competing claims and symbolic links', (t) => {
+  const root = sandbox({ target: JSON.stringify({ pid: process.pid, token: 'target' }) });
+  t.after(() => cleanup(root));
+  const state = join(root, '.reorg');
+  const filename = join(state, RECOVERY_LOCK_FILE);
+  mkdirSync(state);
+
+  const exited = spawnSync(process.execPath, ['-e', '']);
+  assert.equal(exited.status, 0);
+  writeFileSync(filename, JSON.stringify({ pid: exited.pid, token: 'stale' }), { flag: 'wx', mode: 0o600 });
+  linkSync(filename, `${filename}${RECLAIM_SUFFIX}`);
+  assert.throws(() => acquireRecoveryLock(filename), /Apply or recovery is busy/);
+
+  cleanup(root);
+  const symlinkRoot = sandbox({ target: JSON.stringify({ pid: process.pid, token: 'target' }) });
+  t.after(() => cleanup(symlinkRoot));
+  const symlinkState = join(symlinkRoot, '.reorg');
+  mkdirSync(symlinkState);
+  symlinkSync(join(symlinkRoot, 'target'), join(symlinkState, RECOVERY_LOCK_FILE));
+  assert.throws(() => acquireRecoveryLock(join(symlinkState, RECOVERY_LOCK_FILE)), /Recovery lock is not a regular file/);
+});
 
 test('CLI reports a partial apply and keeps its plan and recovery available', (t) => {
   const root = prepare(t);
