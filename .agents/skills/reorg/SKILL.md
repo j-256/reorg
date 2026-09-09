@@ -73,6 +73,8 @@ Keep planning as the default outcome.
 3. Use `<reorg> undo <root> [--data-dir <dir>]` only when the user explicitly requests undo.
 4. Inspect after apply or undo and report the refreshed shared state and recovery command.
 
+Apply refuses symlinked parent directories, non-directory barriers, and occupied staging paths. Inspect the reported drift before preparing another apply, and preserve existing recovery entries. A symlink itself can still move as a directory entry; Reorg does not follow it to move its target.
+
 Never enact the plan with `mv`, `rm`, `cp`, `git mv`, direct editor operations, or raw state edits. Enable browser apply with `--allow-apply` only when the user explicitly asks for an apply-enabled browser session.
 
 ## Report the result

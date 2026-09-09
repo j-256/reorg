@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve as resolvePath, sep } from 'node:path';
+import { directoryProblem } from './paths.js';
 
 export const STATE_DIR = '.reorg';
 export const PLAN_FILE = 'plan.json';
@@ -67,8 +68,12 @@ function realLocation(path) {
 export function validateDataDir(root, dataDir = null) {
   const rootAbs = resolvePath(root);
   const dir = stateDir(rootAbs, dataDir);
-  const rel = relative(realLocation(rootAbs), realLocation(dir));
   const isDefault = dir === recoveryDir(rootAbs);
+  if (isDefault) {
+    const problem = directoryProblem(rootAbs, STATE_DIR);
+    if (problem) throw new Error(problem);
+  }
+  const rel = relative(realLocation(rootAbs), realLocation(dir));
   if (rel === '') {
     throw new Error('The reorganized directory itself cannot be used as --data-dir');
   }

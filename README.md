@@ -211,6 +211,7 @@ Applying a reorganization is the part that can ruin your afternoon, so the plan 
 - **The live server is local and token-gated.** It binds to loopback, requires the per-run token carried in the browser URL, and confines file access to the scan root.
 - **Nothing is deleted.** "Trash" moves into `.reorg/trash/<run>/`. Emptying that is a separate decision you make yourself.
 - **Drift aborts the whole batch.** Every source path is checked to still exist and every destination to be free *before* the first move. If the tree changed since the scan, nothing is applied – not "nothing further", nothing at all.
+- **Directory traversal stays inside the selected root.** Apply refuses symlinked parents, non-directory barriers, and occupied staging paths. Links themselves remain movable entries, including broken links. The default `.reorg/` directory must be a real directory.
 - **An undo script is written before execution starts**, so even a crash mid-run leaves a way back. It is guarded per step, so running it after a partial apply undoes only what happened.
 - **Collisions are caught at plan time**, not discovered at move time: two entries landing on one path, a folder marked for trash that still holds things you kept, a folder dragged inside itself.
 - **`git mv` for tracked files**, so history follows the move. (Git refuses this on a fully-untracked directory; Reorg falls back to a plain rename there.)

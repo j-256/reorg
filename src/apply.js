@@ -11,11 +11,12 @@
 //     leaves a way back.
 //  5. Inside a git repo, tracked paths move with `git mv` so history follows.
 
-import { mkdirSync, renameSync, writeFileSync, chmodSync, statSync, lstatSync } from 'node:fs';
+import { mkdirSync, renameSync, writeFileSync, chmodSync, lstatSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { join, dirname, isAbsolute, relative, resolve as resolvePath, sep } from 'node:path';
 import { OP, describeOp } from './plan.js';
 import { ensureStateDir, stateDir, logLine, STATE_DIR } from './state.js';
+import { directoryProblem } from './paths.js';
 
 const TRASH_DIR = 'trash';
 const OP_PATH_FIELDS = Object.freeze(['from', 'to', 'origFrom', 'finalTo']);
@@ -85,6 +86,19 @@ export function checkDrift(root, ops) {
   }
   if (problems.length) return problems;
 
+  const directories = new Set([STATE_DIR, `${STATE_DIR}/stage`, `${STATE_DIR}/${TRASH_DIR}`]);
+  for (const op of ops) {
+    for (const field of OP_PATH_FIELDS) {
+      if (op[field] !== undefined) directories.add(dirname(op[field]));
+    }
+    if (op.op === OP.MKDIR) directories.add(op.to);
+  }
+  for (const directory of directories) {
+    const problem = directoryProblem(root, directory);
+    if (problem) problems.push(problem);
+  }
+  if (problems.length) return [...new Set(problems)];
+
   // Track paths this run will create, so a move into a just-made dir, or a move
   // whose destination is vacated by an earlier move, is not flagged.
   const willExist = new Set();
@@ -96,7 +110,7 @@ export function checkDrift(root, ops) {
       if (pathExists(abs)) {
         // Already there: harmless, mkdir -p semantics. Only a file in the way is fatal.
         try {
-          if (!statSync(abs).isDirectory()) {
+          if (!lstatSync(abs).isDirectory()) {
             problems.push(`${op.to} exists and is not a directory (cannot create it).`);
           }
         } catch {
@@ -111,13 +125,9 @@ export function checkDrift(root, ops) {
       if (!pathExists(src) && !willExist.has(op.from)) {
         problems.push(`${op.from} no longer exists (moved or deleted since the scan).`);
       }
-      // Staging destinations live under .reorg/ and are created by this run, so
-      // they are never pre-existing; only real destinations can be occupied.
-      if (op.op !== OP.STAGE) {
-        const dst = join(root, op.to);
-        if (pathExists(dst) && !willVacate.has(op.to)) {
-          problems.push(`${op.to} already exists; refusing to overwrite it.`);
-        }
+      const dst = join(root, op.to);
+      if (pathExists(dst) && !willVacate.has(op.to)) {
+        problems.push(`${op.to} already exists; refusing to overwrite it.`);
       }
       willVacate.add(op.from);
       willExist.add(op.to);

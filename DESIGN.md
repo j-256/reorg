@@ -104,6 +104,8 @@ The user-visible guarantees are summarized in [README.md](README.md#safety). The
 
 Whole-batch drift validation matters because stopping after a partial collision would leave the directory in a shape that neither the frozen scan nor the intended plan describes. The preflight therefore aborts before any operation when the live filesystem no longer matches the prepared sources and destinations.
 
+Preflight inspects each existing parent directory with `lstat` so a replaced parent cannot redirect source operations or recovery writes through a symlink. The final entry may still be a link when it is being moved or trashed. Existing staging entries are recovery data and block a conflicting run. These checks detect drift present at inspection time; they do not make filesystem operations atomic against unrelated processes changing the tree concurrently.
+
 ## Planner boundaries
 
 ### Live planner
