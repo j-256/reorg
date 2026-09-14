@@ -264,6 +264,10 @@ Position matters because the same word can name a subject rather than a status, 
 
 See [DESIGN.md](DESIGN.md) for the architecture, invariants, source layout, and testing strategy. See [RELEASING.md](RELEASING.md) for the verified-package workflow, trusted publishing configuration, and release recovery procedures.
 
+## Project cover automation
+
+Run `npm run screenshots` to regenerate `docs/screenshots/cover.png` from the actual application with synthetic inputs. CI runs the capture during source verification and retains the image as an artifact. Successful default-branch verification publishes a changed cover with an image-only commit; pull requests render without publishing. Publication skips superseded source revisions so an older build cannot overwrite a newer cover.
+
 ## License
 
 AGPL-3.0-only. See [LICENSE](LICENSE).
