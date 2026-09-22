@@ -136,7 +136,7 @@ async function main() {
     browser = await chromium.launch();
     const context = await browser.newContext({
       viewport: VIEWPORT,
-      deviceScaleFactor: 2, // retina: the UI is dense, and 1x makes the type mushy
+      deviceScaleFactor: 4, // retina: the UI is dense, and 1x makes the type mushy
       colorScheme: 'dark',
     });
     const page = await context.newPage();
