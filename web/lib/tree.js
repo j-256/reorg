@@ -104,15 +104,6 @@ function subtreeMatches(n, matcher) {
   return false;
 }
 
-function accessibleNodeLabel(n) {
-  const facts = [n.cur.name, n.kind === 'dir' ? 'folder' : n.kind === 'link' ? 'symbolic link' : 'file'];
-  if (n.meta) facts.push(n.meta);
-  if (n.collapsedSubtree) facts.push('contents not loaded');
-  const changes = changesOf(n);
-  if (changes.length) facts.push(changes.join(', '));
-  return facts.join(', ');
-}
-
 function renderNode(n, matcher, level) {
   if (matcher && !subtreeMatches(n, matcher)) return null;
 
@@ -121,7 +112,6 @@ function renderNode(n, matcher, level) {
   li.setAttribute('role', 'treeitem');
   li.setAttribute('aria-level', String(level));
   li.setAttribute('aria-selected', String(store.selectedId === n.id));
-  li.setAttribute('aria-label', accessibleNodeLabel(n));
   li.tabIndex = -1;
 
   const tpl = document.getElementById('tpl-row');
